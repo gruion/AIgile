@@ -13,6 +13,52 @@ const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN || "";
 const HASURA_GRAPHQL_URL = process.env.HASURA_GRAPHQL_URL || "http://hasura:8080/v1/graphql";
 const HASURA_ADMIN_SECRET = process.env.HASURA_ADMIN_SECRET || "";
 
+// ─── Epic Field Detection (Jira 9.x vs 10.x compat) ─────
+let EPIC_LINK_FIELDS = ["customfield_10014", "customfield_10101"]; // defaults, updated at startup
+
+async function detectEpicFields() {
+  try {
+    const fields = await jiraFetch("/field");
+    const epicLinkField = fields.find(
+      (f) => f.name === "Epic Link" || f.clauseNames?.includes("'Epic Link'")
+    );
+    const epicNameField = fields.find(
+      (f) => f.name === "Epic Name" || f.clauseNames?.includes("'Epic Name'")
+    );
+    const detected = [];
+    if (epicLinkField) detected.push(epicLinkField.id);
+    if (epicNameField && epicNameField.id !== epicLinkField?.id) detected.push(epicNameField.id);
+    // Always keep known defaults as fallback
+    for (const f of ["customfield_10014", "customfield_10101"]) {
+      if (!detected.includes(f)) detected.push(f);
+    }
+    EPIC_LINK_FIELDS = detected;
+    console.log(`Detected epic fields: ${EPIC_LINK_FIELDS.join(", ")}`);
+  } catch (err) {
+    console.warn(`Could not auto-detect epic fields (${err.message}), using defaults`);
+  }
+}
+
+function getEpicKey(fields) {
+  // Check custom epic link fields first
+  for (const f of EPIC_LINK_FIELDS) {
+    if (fields[f]) return fields[f];
+  }
+  // Jira 10.x: epics are parent issues
+  if (fields.parent?.key) return fields.parent.key;
+  return null;
+}
+
+function getEpicName(fields) {
+  // Check custom epic name/link fields
+  for (const f of EPIC_LINK_FIELDS) {
+    if (fields[f] && typeof fields[f] === "string") return fields[f];
+  }
+  // Jira 10.x: parent summary
+  if (fields.parent?.fields?.summary) return fields.parent.fields.summary;
+  return null;
+}
+
 // ─── Helpers ─────────────────────────────────────────────
 const jiraHeaders = () => ({
   Authorization:
@@ -111,8 +157,9 @@ app.get("/issues", async (req, res) => {
     const jql = req.query.jql || "project = TEAM ORDER BY status ASC, updated DESC";
     const maxResults = parseInt(req.query.maxResults || "100", 10);
 
+    const epicFields = EPIC_LINK_FIELDS.join(",");
     const data = await jiraFetch(
-      `/search?jql=${encodeURIComponent(jql)}&maxResults=${maxResults}&fields=summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,customfield_10014,customfield_10101,parent,timetracking,flagged`
+      `/search?jql=${encodeURIComponent(jql)}&maxResults=${maxResults}&fields=summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged`
     );
 
     const issues = data.issues.map((issue) => {
@@ -131,8 +178,8 @@ app.get("/issues", async (req, res) => {
         created: issue.fields.created,
         updated: issue.fields.updated,
         dueDate: issue.fields.duedate || null,
-        epicKey: issue.fields.customfield_10014 || issue.fields.customfield_10101 || issue.fields.parent?.key || null,
-        epicName: issue.fields.parent?.fields?.summary || issue.fields.customfield_10014 || issue.fields.customfield_10101 || null,
+        epicKey: getEpicKey(issue.fields),
+        epicName: getEpicName(issue.fields),
         originalEstimate: issue.fields.timetracking?.originalEstimate || null,
         remainingEstimate: issue.fields.timetracking?.remainingEstimate || null,
         timeSpent: issue.fields.timetracking?.timeSpent || null,
@@ -252,10 +299,11 @@ app.get("/epic/:key", async (req, res) => {
       epic = { key: epicKey, summary: epicKey, description: "" };
     }
 
-    // Fetch all child tickets in this epic
+    // Fetch all child tickets in this epic (compatible with Jira 9.x Epic Link and 10.x parent)
     const jql = `("Epic Link" = ${epicKey} OR parent = ${epicKey}) ORDER BY status ASC, priority DESC`;
+    const epicFieldsList = EPIC_LINK_FIELDS.join(",");
     const data = await jiraFetch(
-      `/search?jql=${encodeURIComponent(jql)}&maxResults=200&fields=summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,issuelinks,timetracking,customfield_10014,customfield_10101,parent`
+      `/search?jql=${encodeURIComponent(jql)}&maxResults=200&fields=summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,issuelinks,timetracking,${epicFieldsList},parent`
     );
 
     const tickets = data.issues.map((issue) => {
@@ -423,7 +471,9 @@ app.get("/insights/board-summary", async (req, res) => {
 });
 
 // ─── Start ───────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Dashboard API running on port ${PORT}`);
   console.log(`Jira: ${JIRA_BASE_URL}`);
+  // Auto-detect epic custom fields for Jira 9.x / 10.x compatibility
+  await detectEpicFields();
 });

@@ -567,10 +567,12 @@ async function seed() {
     Bug: bugType || taskType,
   };
 
-  // Detect epic fields from create meta (Jira 9.x endpoint)
-  let epicNameField = "customfield_10011";
-  let epicLinkField = "customfield_10014";
+  // Detect epic fields — works for Jira 9.x and 10.x
+  let epicNameField = null;
+  let epicLinkField = null;
+  let useParentField = false;
 
+  // Method 1: createmeta (Jira 9.x+)
   try {
     const epicMeta = await jiraGet(`/issue/createmeta/${PROJECT_KEY}/issuetypes/${epicType}`);
     for (const field of epicMeta.values || []) {
@@ -578,10 +580,34 @@ async function seed() {
       if (field.name === "Epic Link") epicLinkField = field.fieldId;
     }
   } catch {
-    log("Could not detect epic fields, using defaults");
+    log("createmeta not available, trying /field endpoint");
   }
-  log(`Epic Name field: ${epicNameField}`);
-  log(`Epic Link field: ${epicLinkField}`);
+
+  // Method 2: /field endpoint (fallback)
+  if (!epicNameField && !epicLinkField) {
+    try {
+      const allFields = await jiraGet("/field");
+      const epicNameDef = allFields.find((f) => f.name === "Epic Name");
+      const epicLinkDef = allFields.find(
+        (f) => f.name === "Epic Link" || f.clauseNames?.includes("'Epic Link'")
+      );
+      if (epicNameDef) epicNameField = epicNameDef.id;
+      if (epicLinkDef) epicLinkField = epicLinkDef.id;
+    } catch {
+      log("Could not detect epic fields from /field endpoint");
+    }
+  }
+
+  // Jira 10.x: if no epic custom fields found, use parent field
+  if (!epicNameField && !epicLinkField) {
+    useParentField = true;
+    log("No Epic Link/Name custom fields detected — using parent field (Jira 10.x mode)");
+  } else {
+    if (!epicNameField) epicNameField = "customfield_10011";
+    if (!epicLinkField) epicLinkField = "customfield_10014";
+    log(`Epic Name field: ${epicNameField}`);
+    log(`Epic Link field: ${epicLinkField}`);
+  }
 
   console.log("\n--- Creating Epics & Tickets ---\n");
 
@@ -593,8 +619,11 @@ async function seed() {
       summary: epic.summary,
       description: epic.description,
       issuetype: { id: epicType },
-      [epicNameField]: epic.summary,
     };
+    // Jira 9.x requires Epic Name custom field; Jira 10.x doesn't
+    if (epicNameField && !useParentField) {
+      epicFields[epicNameField] = epic.summary;
+    }
 
     let epicIssue;
     try {
@@ -618,22 +647,31 @@ async function seed() {
         labels: ticket.labels || [],
       };
 
-      // Link to epic
-      fields[epicLinkField] = epicIssue.key;
+      // Link to epic — try Epic Link field first, fall back to parent (Jira 10.x)
+      if (!useParentField && epicLinkField) {
+        fields[epicLinkField] = epicIssue.key;
+      } else {
+        fields.parent = { key: epicIssue.key };
+      }
 
       let createdIssue;
       try {
         createdIssue = await createIssue(fields);
         log(`  ✓ ${createdIssue.key} — ${ticket.summary.substring(0, 50)}`);
       } catch (err) {
-        // If epic link field doesn't work, try parent field (next-gen projects)
-        try {
-          delete fields[epicLinkField];
-          fields.parent = { key: epicIssue.key };
-          createdIssue = await createIssue(fields);
-          log(`  ✓ ${createdIssue.key} — ${ticket.summary.substring(0, 50)} (via parent)`);
-        } catch (err2) {
-          console.error(`  ✗ Failed: ${err2.message.substring(0, 100)}`);
+        // If epic link field doesn't work, try parent field (next-gen / Jira 10.x)
+        if (!useParentField && epicLinkField) {
+          try {
+            delete fields[epicLinkField];
+            fields.parent = { key: epicIssue.key };
+            createdIssue = await createIssue(fields);
+            log(`  ✓ ${createdIssue.key} — ${ticket.summary.substring(0, 50)} (via parent)`);
+          } catch (err2) {
+            console.error(`  ✗ Failed: ${err2.message.substring(0, 100)}`);
+            continue;
+          }
+        } else {
+          console.error(`  ✗ Failed: ${err.message.substring(0, 100)}`);
           continue;
         }
       }
