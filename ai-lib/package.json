@@ -1,0 +1,8 @@
+{
+  "name": "jira-dashboard-ai",
+  "version": "1.0.0",
+  "description": "Pluggable AI provider for Jira Dashboard summaries",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {}
+}

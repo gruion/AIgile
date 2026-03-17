@@ -1,0 +1,195 @@
+{
+  "name": "Jira AI Summaries",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      },
+      "id": "trigger",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "http://jira-dashboard-api:3001/issues",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "jql", "value": "project = TEAM ORDER BY updated DESC" },
+            { "name": "maxResults", "value": "100" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "fetch-issues",
+      "name": "Fetch Jira Issues",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flatten all issues from epics + noEpic into a single list\nconst data = $input.first().json;\nconst allIssues = [];\n\nfor (const epic of (data.epics || [])) {\n  for (const issue of epic.issues) {\n    allIssues.push({\n      key: issue.key,\n      summary: issue.summary,\n      status: issue.status,\n      priority: issue.priority,\n      assignee: issue.assigneeName || 'Unassigned',\n      updated: issue.updated,\n      created: issue.created,\n      dueDate: issue.dueDate,\n      labels: issue.labels || [],\n      epicKey: issue.epicKey,\n      lastComment: issue.lastComment,\n      commentCount: issue.commentCount,\n      daysSinceUpdate: issue.daysSinceUpdate\n    });\n  }\n}\n\nfor (const issue of (data.noEpic || [])) {\n  allIssues.push({\n    key: issue.key,\n    summary: issue.summary,\n    status: issue.status,\n    priority: issue.priority,\n    assignee: issue.assigneeName || 'Unassigned',\n    updated: issue.updated,\n    created: issue.created,\n    dueDate: issue.dueDate,\n    labels: issue.labels || [],\n    epicKey: null,\n    lastComment: issue.lastComment,\n    commentCount: issue.commentCount,\n    daysSinceUpdate: issue.daysSinceUpdate\n  });\n}\n\nreturn allIssues.map(i => ({ json: i }));"
+      },
+      "id": "flatten-issues",
+      "name": "Flatten Issues",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "url": "http://jira-dashboard-hasura:8080/v1/graphql",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-hasura-admin-secret", "value": "{{ $env.HASURA_ADMIN_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: `query { ai_summaries(where: {issue_key: {_eq: \"${$json.key}\"}}) { issue_key jira_updated_at } }` }) }}",
+        "options": {}
+      },
+      "id": "check-existing",
+      "name": "Check Existing Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "needs-update",
+              "leftValue": "={{ $json.data?.ai_summaries?.[0]?.jira_updated_at !== $('Flatten Issues').item.json.updated }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "needs-update",
+      "name": "Needs Update?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "url": "http://jira-dashboard-api:3001/ai/summarize-ticket",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Flatten Issues').item.json) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "generate-summary",
+      "name": "Generate AI Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -100]
+    },
+    {
+      "parameters": {
+        "url": "http://jira-dashboard-hasura:8080/v1/graphql",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-hasura-admin-secret", "value": "{{ $env.HASURA_ADMIN_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: `mutation { insert_ai_summaries_one(object: {issue_key: \"${$('Flatten Issues').item.json.key}\", jira_updated_at: \"${$('Flatten Issues').item.json.updated}\", tldr: ${JSON.stringify($json.tldr || '')}, status_insight: ${JSON.stringify($json.status_insight || '')}, action_needed: ${JSON.stringify($json.action_needed || '')}, risk_level: ${JSON.stringify($json.risk_level || 'medium')}, risk_reason: ${JSON.stringify($json.risk_reason || '')}, staleness_days: ${$json.staleness_days || 0}, generated_at: \"${new Date().toISOString()}\"}, on_conflict: {constraint: idx_ai_summaries_issue_key, update_columns: [jira_updated_at, tldr, status_insight, action_needed, risk_level, risk_reason, staleness_days, generated_at]}) { id issue_key } }` }) }}",
+        "options": {}
+      },
+      "id": "upsert-summary",
+      "name": "Upsert to Hasura",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, -100]
+    },
+    {
+      "parameters": {},
+      "id": "skip",
+      "name": "Skip (Up to date)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1100, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collect all issues for board summary\nconst data = $('Fetch Jira Issues').first().json;\nconst allIssues = [];\n\nfor (const epic of (data.epics || [])) {\n  for (const issue of epic.issues) {\n    allIssues.push({\n      key: issue.key,\n      summary: issue.summary,\n      status: issue.status,\n      priority: issue.priority,\n      assignee: issue.assigneeName || 'Unassigned',\n      updated: issue.updated,\n      dueDate: issue.dueDate,\n      labels: issue.labels || []\n    });\n  }\n}\nfor (const issue of (data.noEpic || [])) {\n  allIssues.push({\n    key: issue.key,\n    summary: issue.summary,\n    status: issue.status,\n    priority: issue.priority,\n    assignee: issue.assigneeName || 'Unassigned',\n    updated: issue.updated,\n    dueDate: issue.dueDate,\n    labels: issue.labels || []\n  });\n}\n\nreturn [{ json: { tickets: allIssues, jql: 'project = TEAM ORDER BY updated DESC' } }];"
+      },
+      "id": "prep-board",
+      "name": "Prep Board Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 250]
+    },
+    {
+      "parameters": {
+        "url": "http://jira-dashboard-api:3001/ai/summarize-board",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "generate-board-summary",
+      "name": "Generate Board Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 250]
+    },
+    {
+      "parameters": {
+        "url": "http://jira-dashboard-hasura:8080/v1/graphql",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-hasura-admin-secret", "value": "{{ $env.HASURA_ADMIN_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: `mutation { insert_ai_board_summaries_one(object: {jql_hash: \"default\", jql: ${JSON.stringify($('Prep Board Data').first().json.jql)}, executive_summary: ${JSON.stringify($json.executive_summary || '')}, blocked_tickets: ${JSON.stringify(JSON.stringify($json.blocked_tickets || []))}, stale_tickets: ${JSON.stringify(JSON.stringify($json.stale_tickets || []))}, team_workload: ${JSON.stringify(JSON.stringify($json.team_workload || {}))}, recommendations: ${JSON.stringify(JSON.stringify($json.recommendations || []))}, total_issues: ${$('Prep Board Data').first().json.tickets?.length || 0}, generated_at: \"${new Date().toISOString()}\"}, on_conflict: {constraint: idx_board_summaries_hash, update_columns: [jql, executive_summary, blocked_tickets, stale_tickets, team_workload, recommendations, total_issues, generated_at]}) { id } }` }) }}",
+        "options": {}
+      },
+      "id": "upsert-board-summary",
+      "name": "Upsert Board Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 250]
+    }
+  ],
+  "connections": {
+    "Every 15 min": { "main": [[{ "node": "Fetch Jira Issues", "type": "main", "index": 0 }]] },
+    "Fetch Jira Issues": {
+      "main": [
+        [
+          { "node": "Flatten Issues", "type": "main", "index": 0 },
+          { "node": "Prep Board Data", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Flatten Issues": { "main": [[{ "node": "Check Existing Summary", "type": "main", "index": 0 }]] },
+    "Check Existing Summary": { "main": [[{ "node": "Needs Update?", "type": "main", "index": 0 }]] },
+    "Needs Update?": {
+      "main": [
+        [{ "node": "Generate AI Summary", "type": "main", "index": 0 }],
+        [{ "node": "Skip (Up to date)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Generate AI Summary": { "main": [[{ "node": "Upsert to Hasura", "type": "main", "index": 0 }]] },
+    "Prep Board Data": { "main": [[{ "node": "Generate Board Summary", "type": "main", "index": 0 }]] },
+    "Generate Board Summary": { "main": [[{ "node": "Upsert Board Summary", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

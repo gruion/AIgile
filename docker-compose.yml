@@ -1,0 +1,130 @@
+services:
+  # ─── Jira Software (Data Center) ───────────────────────────
+  jira:
+    image: atlassian/jira-software:9.12-jdk17
+    container_name: jira-dashboard-jira
+    ports:
+      - "9080:8080"
+    environment:
+      - ATL_JDBC_URL=jdbc:postgresql://jira-db:5432/jira
+      - ATL_JDBC_USER=jira
+      - ATL_JDBC_PASSWORD=${JIRA_DB_PASSWORD}
+      - ATL_DB_DRIVER=org.postgresql.Driver
+      - ATL_DB_TYPE=postgres72
+      - JVM_MINIMUM_MEMORY=1024m
+      - JVM_MAXIMUM_MEMORY=2048m
+    volumes:
+      - jira-data:/var/atlassian/application-data/jira
+    depends_on:
+      jira-db:
+        condition: service_healthy
+    networks:
+      - jira-net
+    restart: unless-stopped
+
+  # ─── PostgreSQL for Jira ───────────────────────────────────
+  jira-db:
+    image: postgres:15-alpine
+    container_name: jira-dashboard-db
+    environment:
+      - POSTGRES_DB=jira
+      - POSTGRES_USER=jira
+      - POSTGRES_PASSWORD=${JIRA_DB_PASSWORD}
+    volumes:
+      - jira-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jira"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jira-net
+    restart: unless-stopped
+
+  # ─── PostgreSQL for Hasura (AI summaries) ──────────────────
+  hasura-db:
+    image: postgres:15-alpine
+    container_name: jira-dashboard-hasura-db
+    environment:
+      - POSTGRES_DB=dashboard
+      - POSTGRES_USER=dashboard
+      - POSTGRES_PASSWORD=${HASURA_DB_PASSWORD}
+    volumes:
+      - hasura-db-data:/var/lib/postgresql/data
+      - ./hasura/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jira-net
+    restart: unless-stopped
+
+  # ─── Hasura GraphQL Engine ─────────────────────────────────
+  hasura:
+    image: hasura/graphql-engine:v2.44.0
+    container_name: jira-dashboard-hasura
+    ports:
+      - "9081:8080"
+    environment:
+      HASURA_GRAPHQL_DATABASE_URL: postgres://dashboard:${HASURA_DB_PASSWORD}@hasura-db:5432/dashboard
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
+      HASURA_GRAPHQL_DEV_MODE: "true"
+      HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET}
+      HASURA_GRAPHQL_UNAUTHORIZED_ROLE: anonymous
+      HASURA_GRAPHQL_ENABLE_TELEMETRY: "false"
+    depends_on:
+      hasura-db:
+        condition: service_healthy
+    networks:
+      - jira-net
+    restart: unless-stopped
+
+  # ─── Backend API (Jira proxy + AI summary read) ────────────
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: jira-dashboard-api
+    ports:
+      - "3011:3001"
+    env_file:
+      - .env
+    environment:
+      - JIRA_BASE_URL=http://jira:8080
+      - HASURA_GRAPHQL_URL=http://hasura:8080/v1/graphql
+      - HASURA_ADMIN_SECRET=${HASURA_ADMIN_SECRET}
+      - AI_PROVIDER=${AI_PROVIDER:-mock}
+      - PORT=3001
+    depends_on:
+      - hasura
+    networks:
+      - jira-net
+    restart: unless-stopped
+
+  # ─── Custom Frontend (Dashboard + Insights) ────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: jira-dashboard-frontend
+    ports:
+      - "3010:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:3011
+      - NEXT_PUBLIC_HASURA_URL=http://localhost:9081/v1/graphql
+    depends_on:
+      - api
+    networks:
+      - jira-net
+    restart: unless-stopped
+
+volumes:
+  jira-data:
+  jira-db-data:
+  hasura-db-data:
+
+networks:
+  jira-net:
+    driver: bridge
