@@ -5,6 +5,7 @@ import Link from "next/link";
 import StatsBar from "../components/StatsBar";
 import EpicCard from "../components/EpicCard";
 import IssueRow from "../components/IssueRow";
+import FilterBar from "../components/FilterBar";
 import { fetchIssues } from "../lib/api";
 
 const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
@@ -92,6 +93,24 @@ export default function Home() {
                 >
                   Gantt
                 </Link>
+                <Link
+                  href="/analyze"
+                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
+                >
+                  Analyze
+                </Link>
+                <Link
+                  href="/analytics"
+                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
+                >
+                  Analytics
+                </Link>
+                <Link
+                  href="/settings"
+                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
+                >
+                  Settings
+                </Link>
               </nav>
               {data && (
                 <span className="text-xs text-gray-400">{data.total} issues</span>
@@ -141,8 +160,19 @@ export default function Home() {
             </button>
           </form>
 
+          {/* Jira saved filters / boards */}
+          <div className="mt-3">
+            <FilterBar
+              currentJql={jql}
+              onApplyFilter={(newJql) => {
+                setJql(newJql);
+                setInputJql(newJql);
+              }}
+            />
+          </div>
+
           {/* Quick filters */}
-          <div className="flex gap-1 mt-3">
+          <div className="flex gap-1 mt-2">
             {[
               { key: "all", label: "All" },
               { key: "critical", label: "Critical" },

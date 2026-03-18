@@ -185,6 +185,24 @@ export default function InsightsPage() {
                 >
                   Gantt
                 </Link>
+                <Link
+                  href="/analyze"
+                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
+                >
+                  Analyze
+                </Link>
+                <Link
+                  href="/analytics"
+                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
+                >
+                  Analytics
+                </Link>
+                <Link
+                  href="/settings"
+                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
+                >
+                  Settings
+                </Link>
               </nav>
             </div>
             <button

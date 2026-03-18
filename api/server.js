@@ -22,6 +22,10 @@ const HASURA_GRAPHQL_URL = process.env.HASURA_GRAPHQL_URL || "http://localhost:9
 const HASURA_ADMIN_SECRET = process.env.HASURA_ADMIN_SECRET || "";
 const DEFAULT_JQL = process.env.JIRA_DEFAULT_JQL || `project = ${JIRA_PROJECT_KEY} ORDER BY status ASC, updated DESC`;
 
+// Custom JQL template for finding epic children — use {EPIC_KEY} as placeholder
+// Example: 'labels = "{EPIC_KEY}" ORDER BY status ASC'
+let EPIC_CHILDREN_JQL_TEMPLATE = process.env.EPIC_CHILDREN_JQL_TEMPLATE || "";
+
 // ─── Epic Field Detection (Jira 9.x vs 10.x compat) ─────
 let EPIC_LINK_FIELDS = ["customfield_10014", "customfield_10101"];
 let HAS_EPIC_LINK_JQL = false; // whether "Epic Link" JQL clause works
@@ -88,6 +92,16 @@ async function jiraFetch(path) {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Jira API ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+async function jiraFetchAgile(path) {
+  const url = `${JIRA_BASE_URL}/rest/agile/1.0${path}`;
+  const res = await fetch(url, { headers: jiraHeaders() });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Jira Agile API ${res.status}: ${text}`);
   }
   return res.json();
 }
@@ -174,18 +188,20 @@ async function hasuraQuery(query, variables = {}) {
 
 // Build JQL to find children of an epic, compatible with all Jira versions
 function buildEpicChildrenJql(epicKey) {
+  // Priority 1: User-defined custom JQL template
+  if (EPIC_CHILDREN_JQL_TEMPLATE) {
+    return EPIC_CHILDREN_JQL_TEMPLATE.replace(/\{EPIC_KEY\}/g, epicKey);
+  }
+
   const clauses = [];
 
-  // Method 1: "Epic Link" — classic Jira Server/DC with Software
+  // Method 2: "Epic Link" — classic Jira Server/DC with Software
   if (HAS_EPIC_LINK_JQL) {
     clauses.push(`"Epic Link" = ${epicKey}`);
   }
 
-  // Method 2: parent = KEY — Jira 10.x / next-gen / team-managed
+  // Method 3: parent = KEY — Jira 10.x / next-gen / team-managed
   clauses.push(`parent = ${epicKey}`);
-
-  // Method 3: issueFunction if ScriptRunner is installed (commented — uncommon)
-  // clauses.push(`issueFunction in subtasksOf("key = ${epicKey}")`);
 
   return `(${clauses.join(" OR ")}) ORDER BY status ASC, priority DESC`;
 }
@@ -194,6 +210,113 @@ function buildEpicChildrenJql(epicKey) {
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok", jira: JIRA_BASE_URL, epicLinkJql: HAS_EPIC_LINK_JQL });
+});
+
+// Settings — runtime config for epic children JQL, etc.
+app.get("/settings", (req, res) => {
+  res.json({
+    epicChildrenJqlTemplate: EPIC_CHILDREN_JQL_TEMPLATE,
+    hasEpicLinkJql: HAS_EPIC_LINK_JQL,
+    epicLinkFields: EPIC_LINK_FIELDS,
+    defaultJql: DEFAULT_JQL,
+  });
+});
+
+app.post("/settings", (req, res) => {
+  const { epicChildrenJqlTemplate } = req.body;
+  if (typeof epicChildrenJqlTemplate === "string") {
+    EPIC_CHILDREN_JQL_TEMPLATE = epicChildrenJqlTemplate;
+    console.log(`Epic children JQL template updated: ${EPIC_CHILDREN_JQL_TEMPLATE || "(auto-detect)"}`);
+  }
+  res.json({
+    epicChildrenJqlTemplate: EPIC_CHILDREN_JQL_TEMPLATE,
+    hasEpicLinkJql: HAS_EPIC_LINK_JQL,
+  });
+});
+
+// Jira saved filters — favourite filters, board filters, and quick links
+app.get("/filters", async (req, res) => {
+  try {
+    const results = { favourite: [], boards: [], recent: [] };
+
+    // 1. User's favourite/starred filters
+    try {
+      const favFilters = await jiraFetch("/filter/favourite");
+      results.favourite = favFilters.map((f) => ({
+        id: f.id,
+        name: f.name,
+        jql: f.jql,
+        owner: f.owner?.displayName || null,
+        viewUrl: f.viewUrl || null,
+      }));
+    } catch {
+      // favourite endpoint may not be available
+    }
+
+    // 2. Boards (Kanban + Scrum) the user can see
+    try {
+      const boardData = await jiraFetchAgile("/board?maxResults=50");
+      for (const board of boardData.values || []) {
+        const entry = {
+          id: board.id,
+          name: board.name,
+          type: board.type, // "kanban" | "scrum" | "simple"
+          jql: null,
+          projectKey: board.location?.projectKey || null,
+        };
+        // Fetch the board's filter to get its JQL
+        try {
+          const boardConfig = await jiraFetchAgile(`/board/${board.id}/configuration`);
+          if (boardConfig.filter?.id) {
+            const boardFilter = await jiraFetch(`/filter/${boardConfig.filter.id}`);
+            entry.jql = boardFilter.jql;
+            entry.filterName = boardFilter.name;
+          }
+        } catch {
+          // Some boards may not expose config
+        }
+        results.boards.push(entry);
+      }
+    } catch {
+      // Agile API may not be available
+    }
+
+    // 3. Recent filters (not favourites)
+    try {
+      const myFilters = await jiraFetch("/filter/search?maxResults=20&orderBy=IS_FAVOURITE&expand=jql");
+      results.recent = (myFilters.values || [])
+        .filter((f) => !results.favourite.some((fav) => fav.id === f.id))
+        .map((f) => ({
+          id: f.id,
+          name: f.name,
+          jql: f.jql,
+          owner: f.owner?.displayName || null,
+        }));
+    } catch {
+      // filter/search may not be available on older versions
+    }
+
+    // 4. Build swimlane-like quick filters from boards
+    for (const board of results.boards) {
+      try {
+        const props = await jiraFetchAgile(`/board/${board.id}/properties/GreenHopper.quickFilters`);
+        if (props.value) {
+          board.quickFilters = (Array.isArray(props.value) ? props.value : []).map((qf) => ({
+            id: qf.id,
+            name: qf.name,
+            jql: qf.query,
+          }));
+        }
+      } catch {
+        // quickFilters property may not exist
+      }
+    }
+
+    res.json(results);
+  } catch (err) {
+    console.error("Error fetching filters:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Main endpoint: issues grouped by epic with urgency flags
@@ -415,6 +538,301 @@ app.get("/epic/:key", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching epic detail:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PM Analytics endpoint ────────────────────────────────
+
+function computeQualityScore(issue) {
+  let score = 0;
+  let maxScore = 0;
+  const breakdown = {};
+
+  // Has summary (always true, but check length)
+  maxScore += 15;
+  if (issue.fields.summary && issue.fields.summary.length > 10) {
+    score += 15;
+    breakdown.summary = { score: 15, max: 15, status: "ok" };
+  } else {
+    breakdown.summary = { score: 0, max: 15, status: "missing" };
+  }
+
+  // Has description
+  maxScore += 20;
+  const desc = issue.fields.description || "";
+  if (desc.length > 50) {
+    score += 20;
+    breakdown.description = { score: 20, max: 20, status: "ok" };
+  } else if (desc.length > 0) {
+    score += 10;
+    breakdown.description = { score: 10, max: 20, status: "short" };
+  } else {
+    breakdown.description = { score: 0, max: 20, status: "missing" };
+  }
+
+  // Has assignee
+  maxScore += 15;
+  if (issue.fields.assignee) {
+    score += 15;
+    breakdown.assignee = { score: 15, max: 15, status: "ok" };
+  } else {
+    breakdown.assignee = { score: 0, max: 15, status: "missing" };
+  }
+
+  // Has priority set (not just default)
+  maxScore += 10;
+  if (issue.fields.priority && issue.fields.priority.name !== "Medium") {
+    score += 10;
+    breakdown.priority = { score: 10, max: 10, status: "ok" };
+  } else if (issue.fields.priority) {
+    score += 5;
+    breakdown.priority = { score: 5, max: 10, status: "default" };
+  } else {
+    breakdown.priority = { score: 0, max: 10, status: "missing" };
+  }
+
+  // Has due date
+  maxScore += 15;
+  if (issue.fields.duedate) {
+    score += 15;
+    breakdown.dueDate = { score: 15, max: 15, status: "ok" };
+  } else {
+    breakdown.dueDate = { score: 0, max: 15, status: "missing" };
+  }
+
+  // Has estimate
+  maxScore += 10;
+  if (issue.fields.timetracking?.originalEstimate) {
+    score += 10;
+    breakdown.estimate = { score: 10, max: 10, status: "ok" };
+  } else {
+    breakdown.estimate = { score: 0, max: 10, status: "missing" };
+  }
+
+  // Has labels
+  maxScore += 5;
+  if (issue.fields.labels && issue.fields.labels.length > 0) {
+    score += 5;
+    breakdown.labels = { score: 5, max: 5, status: "ok" };
+  } else {
+    breakdown.labels = { score: 0, max: 5, status: "missing" };
+  }
+
+  // Has comments (activity)
+  maxScore += 10;
+  const commentCount = issue.fields.comment?.total || 0;
+  if (commentCount >= 2) {
+    score += 10;
+    breakdown.comments = { score: 10, max: 10, status: "ok" };
+  } else if (commentCount === 1) {
+    score += 5;
+    breakdown.comments = { score: 5, max: 10, status: "low" };
+  } else {
+    breakdown.comments = { score: 0, max: 10, status: "none" };
+  }
+
+  return {
+    score: Math.round((score / maxScore) * 100),
+    rawScore: score,
+    maxScore,
+    breakdown,
+  };
+}
+
+app.get("/analytics", async (req, res) => {
+  try {
+    const jql = req.query.jql || DEFAULT_JQL;
+    const epicFields = EPIC_LINK_FIELDS.join(",");
+    const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged`;
+
+    const data = await jiraSearchAll(jql, fieldsStr);
+    const now = Date.now();
+
+    // ── Ticket Quality Scores ──
+    const qualityScores = data.issues.map((issue) => {
+      const qs = computeQualityScore(issue);
+      return {
+        key: issue.key,
+        summary: issue.fields.summary,
+        status: issue.fields.status?.name,
+        statusCategory: issue.fields.status?.statusCategory?.key,
+        assigneeName: issue.fields.assignee?.displayName || null,
+        priority: issue.fields.priority?.name,
+        issueType: issue.fields.issuetype?.name,
+        qualityScore: qs.score,
+        breakdown: qs.breakdown,
+      };
+    });
+
+    const avgQuality = qualityScores.length > 0
+      ? Math.round(qualityScores.reduce((s, q) => s + q.qualityScore, 0) / qualityScores.length)
+      : 0;
+
+    // Quality distribution
+    const qualityDistribution = {
+      excellent: qualityScores.filter((q) => q.qualityScore >= 80).length,
+      good: qualityScores.filter((q) => q.qualityScore >= 60 && q.qualityScore < 80).length,
+      fair: qualityScores.filter((q) => q.qualityScore >= 40 && q.qualityScore < 60).length,
+      poor: qualityScores.filter((q) => q.qualityScore < 40).length,
+    };
+
+    // ── Aging WIP ──
+    const wipIssues = data.issues
+      .filter((i) => i.fields.status?.statusCategory?.key === "indeterminate")
+      .map((issue) => {
+        const createdDate = new Date(issue.fields.created).getTime();
+        const ageDays = Math.floor((now - createdDate) / 86400000);
+        return {
+          key: issue.key,
+          summary: issue.fields.summary,
+          status: issue.fields.status?.name,
+          assigneeName: issue.fields.assignee?.displayName || null,
+          priority: issue.fields.priority?.name,
+          created: issue.fields.created,
+          updated: issue.fields.updated,
+          ageDays,
+          daysSinceUpdate: daysSince(issue.fields.updated),
+        };
+      })
+      .sort((a, b) => b.ageDays - a.ageDays);
+
+    // WIP aging buckets
+    const wipBuckets = {
+      "0-3d": wipIssues.filter((i) => i.ageDays <= 3).length,
+      "4-7d": wipIssues.filter((i) => i.ageDays > 3 && i.ageDays <= 7).length,
+      "1-2w": wipIssues.filter((i) => i.ageDays > 7 && i.ageDays <= 14).length,
+      "2-4w": wipIssues.filter((i) => i.ageDays > 14 && i.ageDays <= 28).length,
+      "1-2m": wipIssues.filter((i) => i.ageDays > 28 && i.ageDays <= 60).length,
+      "2m+": wipIssues.filter((i) => i.ageDays > 60).length,
+    };
+
+    // ── Status Distribution ──
+    const statusMap = {};
+    data.issues.forEach((issue) => {
+      const name = issue.fields.status?.name || "Unknown";
+      const cat = issue.fields.status?.statusCategory?.key || "new";
+      if (!statusMap[name]) statusMap[name] = { name, category: cat, count: 0 };
+      statusMap[name].count++;
+    });
+
+    // ── Priority Distribution ──
+    const priorityMap = {};
+    data.issues.forEach((issue) => {
+      const name = issue.fields.priority?.name || "None";
+      if (!priorityMap[name]) priorityMap[name] = { name, count: 0 };
+      priorityMap[name].count++;
+    });
+    const highestCount = (priorityMap["Highest"]?.count || 0) + (priorityMap["High"]?.count || 0);
+    const priorityInflation = data.issues.length > 0
+      ? Math.round((highestCount / data.issues.length) * 100)
+      : 0;
+
+    // ── Team Workload ──
+    const teamMap = {};
+    data.issues.forEach((issue) => {
+      const name = issue.fields.assignee?.displayName || "Unassigned";
+      if (!teamMap[name]) teamMap[name] = { name, total: 0, inProgress: 0, todo: 0, done: 0, overdue: 0 };
+      teamMap[name].total++;
+      const cat = issue.fields.status?.statusCategory?.key;
+      if (cat === "done") teamMap[name].done++;
+      else if (cat === "indeterminate") teamMap[name].inProgress++;
+      else teamMap[name].todo++;
+      if (issue.fields.duedate && new Date(issue.fields.duedate).getTime() < now && cat !== "done") {
+        teamMap[name].overdue++;
+      }
+    });
+
+    // ── Due Date Compliance ──
+    const withDueDate = data.issues.filter((i) => i.fields.duedate);
+    const doneWithDueDate = withDueDate.filter((i) => i.fields.status?.statusCategory?.key === "done");
+    const completedOnTime = doneWithDueDate.filter((i) => {
+      // Check if updated (approximate completion) was before due date
+      const dueTime = new Date(i.fields.duedate).getTime();
+      const updatedTime = new Date(i.fields.updated).getTime();
+      return updatedTime <= dueTime + 86400000; // 1 day grace
+    });
+    const overdueActive = withDueDate.filter(
+      (i) => i.fields.status?.statusCategory?.key !== "done" && new Date(i.fields.duedate).getTime() < now
+    );
+
+    // ── Cycle Time (approximate: created → done, for done issues) ──
+    const doneIssues = data.issues.filter((i) => i.fields.status?.statusCategory?.key === "done");
+    const cycleTimes = doneIssues.map((i) => {
+      const created = new Date(i.fields.created).getTime();
+      const updated = new Date(i.fields.updated).getTime();
+      return Math.max(1, Math.floor((updated - created) / 86400000));
+    });
+    const avgCycleTime = cycleTimes.length > 0
+      ? Math.round(cycleTimes.reduce((a, b) => a + b, 0) / cycleTimes.length)
+      : 0;
+    const medianCycleTime = cycleTimes.length > 0
+      ? cycleTimes.sort((a, b) => a - b)[Math.floor(cycleTimes.length / 2)]
+      : 0;
+
+    // Cycle time buckets
+    const cycleTimeBuckets = {
+      "1d": cycleTimes.filter((c) => c <= 1).length,
+      "2-3d": cycleTimes.filter((c) => c > 1 && c <= 3).length,
+      "4-7d": cycleTimes.filter((c) => c > 3 && c <= 7).length,
+      "1-2w": cycleTimes.filter((c) => c > 7 && c <= 14).length,
+      "2-4w": cycleTimes.filter((c) => c > 14 && c <= 28).length,
+      "1m+": cycleTimes.filter((c) => c > 28).length,
+    };
+
+    // ── Stale Tickets ──
+    const staleIssues = data.issues
+      .filter((i) => {
+        const cat = i.fields.status?.statusCategory?.key;
+        return cat !== "done" && daysSince(i.fields.updated) >= 7;
+      })
+      .map((i) => ({
+        key: i.key,
+        summary: i.fields.summary,
+        status: i.fields.status?.name,
+        assigneeName: i.fields.assignee?.displayName || null,
+        daysSinceUpdate: daysSince(i.fields.updated),
+        priority: i.fields.priority?.name,
+      }))
+      .sort((a, b) => b.daysSinceUpdate - a.daysSinceUpdate);
+
+    // ── Reassignment detection (based on last comment mentioning reassign/transfer) ──
+    // Simplified: count unassigned issues as potential reassignment issues
+    const unassignedActive = data.issues.filter(
+      (i) => !i.fields.assignee && i.fields.status?.statusCategory?.key !== "done"
+    ).length;
+
+    res.json({
+      total: data.total,
+      qualityScores: qualityScores.sort((a, b) => a.qualityScore - b.qualityScore),
+      avgQuality,
+      qualityDistribution,
+      wipIssues,
+      wipBuckets,
+      wipCount: wipIssues.length,
+      statusDistribution: Object.values(statusMap).sort((a, b) => b.count - a.count),
+      priorityDistribution: Object.values(priorityMap).sort((a, b) => b.count - a.count),
+      priorityInflation,
+      teamWorkload: Object.values(teamMap).sort((a, b) => b.total - a.total),
+      dueDateCompliance: {
+        totalWithDueDate: withDueDate.length,
+        completedOnTime: completedOnTime.length,
+        overdueActive: overdueActive.length,
+        complianceRate: doneWithDueDate.length > 0
+          ? Math.round((completedOnTime.length / doneWithDueDate.length) * 100)
+          : null,
+      },
+      cycleTime: {
+        avg: avgCycleTime,
+        median: medianCycleTime,
+        buckets: cycleTimeBuckets,
+        sampleSize: cycleTimes.length,
+      },
+      staleIssues,
+      unassignedActive,
+    });
+  } catch (err) {
+    console.error("Error computing analytics:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
