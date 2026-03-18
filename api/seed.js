@@ -11,24 +11,12 @@
  *   npm run seed
  */
 
-// Load ../.env file (no dotenv dependency needed)
-import { readFileSync } from "fs";
+import dotenv from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-try {
-  const envFile = readFileSync(resolve(__dirname, "../.env"), "utf-8");
-  for (const line of envFile.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eqIndex = trimmed.indexOf("=");
-    if (eqIndex === -1) continue;
-    const key = trimmed.slice(0, eqIndex).trim();
-    const value = trimmed.slice(eqIndex + 1).trim();
-    if (!process.env[key]) process.env[key] = value;
-  }
-} catch {}
+dotenv.config({ path: resolve(__dirname, "../.env") });
 
 const JIRA_BASE_URL = process.env.JIRA_BASE_URL || "http://localhost:9080";
 const JIRA_USERNAME = process.env.JIRA_USERNAME || "admin";

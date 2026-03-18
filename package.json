@@ -1,0 +1,20 @@
+{
+  "name": "jira-dashboard",
+  "version": "1.0.0",
+  "description": "Jira AI Dashboard — standalone dev mode",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev:api & npm run dev:frontend",
+    "dev:api": "cd api && node --watch server.js",
+    "dev:frontend": "dotenv -e .env -- sh -c 'cd frontend && npx next dev -p ${FRONTEND_PORT:-3010}'",
+    "install:all": "cd api && npm install && cd ../frontend && npm install",
+    "seed": "cd api && node seed.js",
+    "build": "cd frontend && npm run build",
+    "start": "npm run start:api & npm run start:frontend",
+    "start:api": "cd api && node server.js",
+    "start:frontend": "dotenv -e .env -- sh -c 'cd frontend && npx next start -p ${FRONTEND_PORT:-3010}'"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^8.0.0"
+  }
+}

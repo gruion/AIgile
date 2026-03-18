@@ -1,7 +1,8 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3011";
 
-export async function fetchIssues(jql, maxResults = 100) {
-  const params = new URLSearchParams({ jql, maxResults: String(maxResults) });
+export async function fetchIssues(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
   const res = await fetch(`${API_URL}/issues?${params}`);
   if (!res.ok) throw new Error("Failed to fetch issues");
   return res.json();

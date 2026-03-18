@@ -7,8 +7,8 @@ import EpicCard from "../components/EpicCard";
 import IssueRow from "../components/IssueRow";
 import { fetchIssues } from "../lib/api";
 
-const DEFAULT_JQL = "project = TEAM ORDER BY status ASC, updated DESC";
-const JIRA_BASE_URL = "http://localhost:9080";
+const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
+const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
 
 export default function Home() {
   const [jql, setJql] = useState(DEFAULT_JQL);
