@@ -5,8 +5,7 @@ import { fetchDependencies, discoverDependencies, fetchConfig } from "../../lib/
 import AiCoachPanel from "../../components/AiCoachPanel";
 import JqlBar from "../../components/JqlBar";
 import { toast } from "../../components/Toaster";
-
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 const DEP_TYPE_COLORS = {
   blocks: "bg-red-100 text-red-800 border-red-200",
@@ -71,10 +70,10 @@ function ProjectBadge({ project }) {
   );
 }
 
-function JiraLink({ issueKey, children }) {
+function JiraLink({ issueKey, jiraBaseUrl, children }) {
   return (
     <a
-      href={`${JIRA_BASE_URL}/browse/${issueKey}`}
+      href={`${jiraBaseUrl}/browse/${issueKey}`}
       target="_blank"
       rel="noopener noreferrer"
       className="text-blue-700 hover:text-blue-900 hover:underline font-mono text-xs"
@@ -144,7 +143,7 @@ function Spinner({ text }) {
 
 // ─── Jira Links Tab ───────────────────────────────────────────────────────────
 
-function JiraLinksTab({ data, loading }) {
+function JiraLinksTab({ data, loading, jiraBaseUrl }) {
   const [crossProjectOnly, setCrossProjectOnly] = useState(true);
 
   if (loading) return <Spinner text="Loading dependency data..." />;
@@ -229,7 +228,7 @@ function JiraLinksTab({ data, loading }) {
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   <ProjectBadge project={edge.fromProject} />
                   <div className="min-w-0">
-                    <JiraLink issueKey={edge.from} />
+                    <JiraLink issueKey={edge.from} jiraBaseUrl={jiraBaseUrl} />
                     {edge.targetSummary && (
                       <p className="text-xs text-gray-500 truncate mt-0.5">{edge.targetSummary}</p>
                     )}
@@ -248,7 +247,7 @@ function JiraLinksTab({ data, loading }) {
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   <ProjectBadge project={edge.toProject} />
                   <div className="min-w-0">
-                    <JiraLink issueKey={edge.to} />
+                    <JiraLink issueKey={edge.to} jiraBaseUrl={jiraBaseUrl} />
                     {edge.targetStatus && (
                       <StatusBadge status={edge.targetStatus} />
                     )}
@@ -278,7 +277,7 @@ function JiraLinksTab({ data, loading }) {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <ProjectBadge project={blocker.project} />
-                    <JiraLink issueKey={blocker.key} />
+                    <JiraLink issueKey={blocker.key} jiraBaseUrl={jiraBaseUrl} />
                     <StatusBadge status={blocker.status} />
                   </div>
                   <p className="text-xs text-gray-600 mt-1 truncate">{blocker.summary}</p>
@@ -297,7 +296,7 @@ function JiraLinksTab({ data, loading }) {
 
 // ─── AI Discovery Tab ─────────────────────────────────────────────────────────
 
-function AiDiscoveryTab({ projects }) {
+function AiDiscoveryTab({ projects, jiraBaseUrl }) {
   const [promptData, setPromptData] = useState(null); // { prompt, issueMap, projectIssueCounts, totalAnalyzed }
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -535,7 +534,7 @@ function AiDiscoveryTab({ projects }) {
                           <div className="flex flex-wrap items-center gap-2 mb-2">
                             <div className="flex items-center gap-1.5">
                               {dep.fromDetail && <ProjectBadge project={dep.fromDetail.key?.split("-")[0] || ""} />}
-                              <JiraLink issueKey={dep.from} />
+                              <JiraLink issueKey={dep.from} jiraBaseUrl={jiraBaseUrl} />
                               {dep.fromDetail && (
                                 <span className="text-xs text-gray-500 truncate max-w-[200px]">{dep.fromDetail.summary}</span>
                               )}
@@ -545,7 +544,7 @@ function AiDiscoveryTab({ projects }) {
                             </svg>
                             <div className="flex items-center gap-1.5">
                               {dep.toDetail && <ProjectBadge project={dep.toDetail.key?.split("-")[0] || ""} />}
-                              <JiraLink issueKey={dep.to} />
+                              <JiraLink issueKey={dep.to} jiraBaseUrl={jiraBaseUrl} />
                               {dep.toDetail && (
                                 <span className="text-xs text-gray-500 truncate max-w-[200px]">{dep.toDetail.summary}</span>
                               )}
@@ -700,6 +699,7 @@ function AiDiscoveryTab({ projects }) {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function DependenciesPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const [activeTab, setActiveTab] = useState("jira");
   const [jiraData, setJiraData] = useState(null);
   const [jiraLoading, setJiraLoading] = useState(true);
@@ -769,11 +769,11 @@ export default function DependenciesPage() {
 
       {/* Tab Content */}
       {activeTab === "jira" && (
-        <JiraLinksTab data={jiraData} loading={jiraLoading} />
+        <JiraLinksTab data={jiraData} loading={jiraLoading} jiraBaseUrl={jiraBaseUrl} />
       )}
 
       {activeTab === "ai" && (
-        <AiDiscoveryTab projects={projects} />
+        <AiDiscoveryTab projects={projects} jiraBaseUrl={jiraBaseUrl} />
       )}
 
     </div>

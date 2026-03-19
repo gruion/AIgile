@@ -7,8 +7,7 @@ import ResizableTable from "../../components/ResizableTable";
 import { fetchIssues, fetchSettings } from "../../lib/api";
 import { selectTicketsForPrompt, formatTicketForPrompt, trimPrompt } from "../../lib/prompt-utils";
 import { toast } from "../../components/Toaster";
-
-const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 // ─── Prompt builder: board-wide scrum/kanban analysis ───
 
@@ -696,8 +695,9 @@ function AnalysisReport({ report }) {
 const STORAGE_KEY = "jira-dashboard-analysis-report";
 
 export default function AnalyzePage() {
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -742,6 +742,14 @@ export default function AnalyzePage() {
   }, []);
 
   useEffect(() => {
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
+
+  useEffect(() => {
+    if (!jql) return;
     loadData(jql);
   }, [jql, loadData]);
 
@@ -1015,6 +1023,20 @@ export default function AnalyzePage() {
             {/* TAB: Report */}
             {tab === "report" && report && <AnalysisReport report={report} />}
           </>
+        )}
+
+        {!loading && !data && !error && !jql && (
+          <div className="text-center py-20 text-gray-400">
+            <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+            <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+            <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+            <p className="text-xs text-gray-400 mt-4">
+              Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+            </p>
+          </div>
         )}
       </main>
     </div>

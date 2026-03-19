@@ -9,13 +9,12 @@ import JqlBar from "../components/JqlBar";
 import AiCoachPanel from "../components/AiCoachPanel";
 import { fetchIssues } from "../lib/api";
 import { toast } from "../components/Toaster";
-
-const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../context/AppConfigContext";
 
 export default function Home() {
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -42,7 +41,14 @@ export default function Home() {
   };
 
   useEffect(() => {
-    loadData(jql);
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
+
+  useEffect(() => {
+    if (jql) loadData(jql);
   }, [jql, loadData]);
 
   useEffect(() => {
@@ -100,7 +106,7 @@ export default function Home() {
                 Refresh
               </button>
               <a
-                href={JIRA_BASE_URL}
+                href={jiraBaseUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md"
@@ -234,7 +240,7 @@ Format with clear headers and bullet points. This should serve as a complete pro
         {!loading && filteredEpics && (
           <div className="space-y-4">
             {filteredEpics.map((epic) => (
-              <EpicCard key={epic.key} epic={epic} jiraBaseUrl={JIRA_BASE_URL} />
+              <EpicCard key={epic.key} epic={epic} jiraBaseUrl={jiraBaseUrl} />
             ))}
           </div>
         )}
@@ -258,7 +264,7 @@ Format with clear headers and bullet points. This should serve as a complete pro
               <span className="w-8 text-center">Cmt</span>
             </div>
             {filteredNoEpic.map((issue) => (
-              <IssueRow key={issue.key} issue={issue} jiraBaseUrl={JIRA_BASE_URL} />
+              <IssueRow key={issue.key} issue={issue} jiraBaseUrl={jiraBaseUrl} />
             ))}
           </div>
         )}
@@ -267,6 +273,20 @@ Format with clear headers and bullet points. This should serve as a complete pro
           <div className="text-center py-12 text-gray-400">
             <p className="text-lg mb-2">No issues found</p>
             <p className="text-sm">Try adjusting your JQL query</p>
+          </div>
+        )}
+
+        {!loading && !data && !error && !jql && (
+          <div className="text-center py-20 text-gray-400">
+            <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+            <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+            <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+            <p className="text-xs text-gray-400 mt-4">
+              Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+            </p>
           </div>
         )}
 

@@ -6,9 +6,7 @@ import IssueHoverCard from "../../components/IssueHoverCard";
 import AiCoachPanel from "../../components/AiCoachPanel";
 import { fetchAnalytics } from "../../lib/api";
 import { toast } from "../../components/Toaster";
-
-const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 const STATUS_CAT_COLORS = {
   new: "bg-gray-200",
@@ -94,8 +92,9 @@ function ScoreRing({ score, size = 80 }) {
 }
 
 export default function AnalyticsPage() {
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -117,7 +116,14 @@ export default function AnalyticsPage() {
   };
 
   useEffect(() => {
-    loadData(jql);
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
+
+  useEffect(() => {
+    if (jql) loadData(jql);
   }, [jql]);
 
   const handleSearch = (e) => {
@@ -380,9 +386,9 @@ export default function AnalyticsPage() {
                               {ticket.qualityScore}
                             </span>
                           </div>
-                          <IssueHoverCard issue={ticket} jiraBaseUrl={JIRA_BASE_URL}>
+                          <IssueHoverCard issue={ticket} jiraBaseUrl={jiraBaseUrl}>
                             <a
-                              href={`${JIRA_BASE_URL}/browse/${ticket.key}`}
+                              href={`${jiraBaseUrl}/browse/${ticket.key}`}
                               target="_blank"
                               rel="noopener noreferrer"
                               onClick={(e) => e.stopPropagation()}
@@ -486,9 +492,9 @@ export default function AnalyticsPage() {
                         <span className={`w-10 text-center text-xs font-bold px-1.5 py-0.5 rounded ${ageColor}`}>
                           {issue.ageDays}d
                         </span>
-                        <IssueHoverCard issue={issue} jiraBaseUrl={JIRA_BASE_URL}>
+                        <IssueHoverCard issue={issue} jiraBaseUrl={jiraBaseUrl}>
                           <a
-                            href={`${JIRA_BASE_URL}/browse/${issue.key}`}
+                            href={`${jiraBaseUrl}/browse/${issue.key}`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-xs font-mono text-blue-600 hover:underline w-20"
@@ -626,9 +632,9 @@ export default function AnalyticsPage() {
                         <span className={`w-16 text-center text-xs font-bold px-1.5 py-0.5 rounded ${staleColor}`}>
                           {issue.daysSinceUpdate}d
                         </span>
-                        <IssueHoverCard issue={issue} jiraBaseUrl={JIRA_BASE_URL}>
+                        <IssueHoverCard issue={issue} jiraBaseUrl={jiraBaseUrl}>
                           <a
-                            href={`${JIRA_BASE_URL}/browse/${issue.key}`}
+                            href={`${jiraBaseUrl}/browse/${issue.key}`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-xs font-mono text-blue-600 hover:underline w-20"
@@ -881,9 +887,9 @@ export default function AnalyticsPage() {
                             {item.score}
                           </span>
                         </div>
-                        <IssueHoverCard issue={item} jiraBaseUrl={JIRA_BASE_URL}>
+                        <IssueHoverCard issue={item} jiraBaseUrl={jiraBaseUrl}>
                           <a
-                            href={`${JIRA_BASE_URL}/browse/${item.key}`}
+                            href={`${jiraBaseUrl}/browse/${item.key}`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-xs font-mono text-blue-600 hover:underline w-20"
@@ -909,6 +915,20 @@ export default function AnalyticsPage() {
               </div>
             )}
           </>
+        )}
+
+        {!loading && !data && !error && !jql && (
+          <div className="text-center py-20 text-gray-400">
+            <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+            <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+            <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+            <p className="text-xs text-gray-400 mt-4">
+              Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+            </p>
+          </div>
         )}
 
       </main>

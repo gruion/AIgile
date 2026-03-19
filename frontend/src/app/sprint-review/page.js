@@ -5,9 +5,7 @@ import { fetchSprintReview, fetchIssues } from "../../lib/api";
 import AiCoachPanel from "../../components/AiCoachPanel";
 import JqlBar from "../../components/JqlBar";
 import { toast } from "../../components/Toaster";
-
-const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 const STATUS_BADGE = {
   done: "bg-green-100 text-green-700",
@@ -88,7 +86,7 @@ function StatusBadge({ status, category }) {
   return <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${cls}`}>{status}</span>;
 }
 
-function EpicCard({ epic, defaultOpen }) {
+function EpicCard({ epic, defaultOpen, jiraBaseUrl }) {
   const [open, setOpen] = useState(defaultOpen);
   const pct = epic.total > 0 ? Math.round((epic.done / epic.total) * 100) : 0;
 
@@ -118,7 +116,7 @@ function EpicCard({ epic, defaultOpen }) {
             <div key={issue.key} className="flex items-center gap-3 px-5 py-3 text-sm hover:bg-gray-50">
               <StatusBadge status={issue.status} category={issue.statusCategory} />
               <a
-                href={`${JIRA_BASE_URL}/browse/${issue.key}`}
+                href={`${jiraBaseUrl}/browse/${issue.key}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-mono text-blue-600 hover:underline shrink-0"
@@ -168,16 +166,25 @@ const AI_PROMPTS = [
 ];
 
 export default function SprintReviewPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [ticketData, setTicketData] = useState(null);
+
+  useEffect(() => {
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      if (!jql) { setLoading(false); return; }
       try {
         setLoading(true);
         setError(null);
@@ -198,8 +205,36 @@ export default function SprintReviewPage() {
 
   // Load ticket context for AI analysis
   useEffect(() => {
-    fetchIssues(jql).then(setTicketData).catch(() => {});
+    if (jql) fetchIssues(jql).then(setTicketData).catch(() => {});
   }, [jql]);
+
+  if (!loading && !data && !error && !jql) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <div className="max-w-6xl mx-auto px-4 py-8">
+          <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6">
+            <JqlBar
+              value={inputJql}
+              onChange={setInputJql}
+              onSubmit={(q) => setJql(q)}
+              placeholder="Select tickets for sprint review context..."
+            />
+          </div>
+          <div className="text-center py-20 text-gray-400">
+            <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+            <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+            <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+            <p className="text-xs text-gray-400 mt-4">
+              Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -335,7 +370,7 @@ export default function SprintReviewPage() {
             <h2 className="text-lg font-semibold text-gray-800 mb-3">By Epic</h2>
             <div className="space-y-3">
               {epicGroups.map((epic, idx) => (
-                <EpicCard key={epic.key || idx} epic={epic} defaultOpen={idx === 0} />
+                <EpicCard key={epic.key || idx} epic={epic} defaultOpen={idx === 0} jiraBaseUrl={jiraBaseUrl} />
               ))}
             </div>
           </div>

@@ -6,8 +6,7 @@ import Link from "next/link";
 import { fetchEpicDetail } from "../../../lib/api";
 import ResizableTable from "../../../components/ResizableTable";
 import IssueHoverCard from "../../../components/IssueHoverCard";
-
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../../context/AppConfigContext";
 
 // ─── Prompt builder (asks AI to return structured JSON) ──
 
@@ -261,7 +260,7 @@ const TICKET_SORT_FN = (a, b, key) => {
   return String(a[key] || "").localeCompare(String(b[key] || ""));
 };
 
-const TICKET_TABLE_COLUMNS = [
+const getTicketTableColumns = (jiraBaseUrl) => [
   {
     key: "ticket", label: "Ticket", sortable: true, defaultWidth: 200, minWidth: 120,
     render: (row) => (
@@ -270,8 +269,8 @@ const TICKET_TABLE_COLUMNS = [
           ...row,
           assigneeName: row.assignee,
           statusCategory: row.status === "Done" ? "done" : row.status === "In Progress" ? "indeterminate" : "new",
-        }} jiraBaseUrl={JIRA_BASE_URL}>
-          <a href={`${JIRA_BASE_URL}/browse/${row.key}`} target="_blank" rel="noopener noreferrer" className="font-bold text-blue-700 hover:underline">{row.key}</a>
+        }} jiraBaseUrl={jiraBaseUrl}>
+          <a href={`${jiraBaseUrl}/browse/${row.key}`} target="_blank" rel="noopener noreferrer" className="font-bold text-blue-700 hover:underline">{row.key}</a>
         </IssueHoverCard>
         <div className="text-gray-600 truncate">{row.summary}</div>
       </div>
@@ -320,10 +319,11 @@ const TICKET_TABLE_COLUMNS = [
   },
 ];
 
-function TicketTable({ tickets }) {
+function TicketTable({ tickets, jiraBaseUrl }) {
+  const columns = useMemo(() => getTicketTableColumns(jiraBaseUrl), [jiraBaseUrl]);
   return (
     <ResizableTable
-      columns={TICKET_TABLE_COLUMNS}
+      columns={columns}
       data={tickets}
       getRowKey={(row, i) => row.key || i}
       rowClassName={(row) => {
@@ -425,7 +425,7 @@ function TeamWorkload({ team }) {
   );
 }
 
-function ReportRenderer({ report }) {
+function ReportRenderer({ report, jiraBaseUrl }) {
   const [view, setView] = useState("table");
   return (
     <div className="space-y-6">
@@ -452,7 +452,7 @@ function ReportRenderer({ report }) {
             </div>
           </div>
           {view === "table" ? (
-            <TicketTable tickets={report.tickets} />
+            <TicketTable tickets={report.tickets} jiraBaseUrl={jiraBaseUrl} />
           ) : (
             <TicketDetailCards tickets={report.tickets} />
           )}
@@ -546,6 +546,7 @@ function RawTicketRow({ ticket }) {
 // ─── Page ───────────────────────────────────────────────
 
 export default function EpicDetailPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const params = useParams();
   const epicKey = params.key;
 
@@ -800,7 +801,7 @@ export default function EpicDetailPage() {
 
             {/* ─── TAB: Report ─── */}
             {tab === "report" && report && (
-              <ReportRenderer report={report} />
+              <ReportRenderer report={report} jiraBaseUrl={jiraBaseUrl} />
             )}
           </>
         )}

@@ -16,9 +16,7 @@ import {
   fetchStandup,
 } from "../../lib/api";
 import { selectTicketsForPrompt, formatTicketForPrompt, trimPrompt } from "../../lib/prompt-utils";
-
-const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 const CATEGORIES = [
   { key: "went_well", label: "Went Well", color: "bg-green-50 border-green-200", badge: "bg-green-100 text-green-700", icon: "\u2705" },
@@ -556,6 +554,7 @@ function StatCard({ label, value, color, bg = "bg-gray-50", alert = false }) {
 }
 
 export default function RetroPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const [view, setView] = useState("sessions"); // "sessions" | "session" | "prompt" | "paste" | "report"
   const [sessions, setSessions] = useState([]);
   const [currentSession, setCurrentSession] = useState(null);
@@ -573,8 +572,8 @@ export default function RetroPage() {
   const [pollInterval, setPollInterval] = useState(null);
 
   // Ticket analysis state
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [ticketData, setTicketData] = useState(null);
   const [ticketLoading, setTicketLoading] = useState(false);
 
@@ -600,9 +599,16 @@ export default function RetroPage() {
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
+  useEffect(() => {
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
+
   // Load analytics and ticket data for prompt building
   useEffect(() => {
-    fetchAnalytics(jql).then(setAnalyticsData).catch(() => {});
+    if (jql) fetchAnalytics(jql).then(setAnalyticsData).catch(() => {});
   }, [jql]);
 
   // Load ticket data when JQL changes
@@ -618,7 +624,7 @@ export default function RetroPage() {
   }, []);
 
   useEffect(() => {
-    loadTickets(jql);
+    if (jql) loadTickets(jql);
   }, [jql, loadTickets]);
 
   // Auto-refresh current session every 5 seconds (collaborative)
@@ -948,7 +954,7 @@ Examples: "What caused [TICKET-KEY] to become stale for 14 days — was it a dep
 
         {/* ═══ TICKET ANALYSIS PANEL ═══ */}
         {ticketData && !ticketLoading && (
-          <TicketAnalysisPanel ticketData={ticketData} jiraBaseUrl={JIRA_BASE_URL} />
+          <TicketAnalysisPanel ticketData={ticketData} jiraBaseUrl={jiraBaseUrl} />
         )}
 
         {/* ═══ SPRINT INSIGHTS (metrics + workload + discussion prompts) ═══ */}
@@ -1387,6 +1393,20 @@ Examples: "What caused [TICKET-KEY] to become stale for 14 days — was it a dep
                 <p className="text-lg font-medium text-indigo-800">{report.next_sprint_focus}</p>
               </div>
             )}
+          </div>
+        )}
+
+        {!loading && !ticketData && !ticketLoading && !jql && view === "sessions" && sessions.length === 0 && (
+          <div className="text-center py-20 text-gray-400">
+            <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+            <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+            <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+            <p className="text-xs text-gray-400 mt-4">
+              Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+            </p>
           </div>
         )}
 

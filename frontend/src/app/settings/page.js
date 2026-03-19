@@ -83,7 +83,7 @@ export default function SettingsPage() {
         if (s.promptSettings) setPromptSettings((prev) => ({ ...prev, ...s.promptSettings }));
         if (cfg.piConfig) setPiConfig(cfg.piConfig);
         if (cfg.teams) setTeams(cfg.teams);
-        if (cfg.servers) setServers(cfg.servers);
+        if (cfg.servers) setServers(cfg.servers.map((s, i) => ({ ...s, _key: `srv-${i}-${Date.now()}` })));
         if (cfg.configSource) setConfigSource(cfg.configSource);
         if (cfg.programBoard) setProgramBoard(cfg.programBoard);
         if (cfg.disabledPiChecks) setDisabledPiChecks(cfg.disabledPiChecks);
@@ -413,7 +413,7 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between mb-1">
                 <h3 className="text-sm font-semibold text-gray-800">Jira Servers</h3>
                 <button
-                  onClick={() => setServers((s) => [...s, { id: `server-${Date.now()}`, name: "", url: "", browserUrl: "", projects: [], hasCredentials: false, _username: "", _token: "", _isNew: true, _showAdvanced: false }])}
+                  onClick={() => setServers((s) => [...s, { id: `server-${Date.now()}`, name: "", url: "", browserUrl: "", projects: [], hasCredentials: false, _username: "", _token: "", _isNew: true, _showAdvanced: false, _key: `srv-new-${Date.now()}` }])}
                   className="text-xs bg-blue-600 text-white px-2 py-1 rounded hover:bg-blue-700"
                 >
                   + Add Server
@@ -426,7 +426,7 @@ export default function SettingsPage() {
                 {servers.map((srv, idx) => {
                   const referencedByTeams = teams.filter((t) => t.serverId === srv.id);
                   return (
-                    <div key={srv.id} className="bg-gray-50 rounded-lg p-3 space-y-2 border border-gray-100">
+                    <div key={srv._key || srv.id} className="bg-gray-50 rounded-lg p-3 space-y-2 border border-gray-100">
                       <div className="flex items-center gap-2">
                         <div className="flex-1 grid grid-cols-2 gap-2">
                           <div>

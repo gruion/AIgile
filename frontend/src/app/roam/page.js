@@ -5,9 +5,7 @@ import { fetchRoamRisks, saveRoamRisk, deleteRoamRisk, fetchIssues } from "../..
 import AiCoachPanel from "../../components/AiCoachPanel";
 import JqlBar from "../../components/JqlBar";
 import { toast } from "../../components/Toaster";
-
-const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 const CATEGORIES = [
   { key: "resolved", label: "Resolved", color: "bg-green-100", headerColor: "bg-green-600", borderColor: "border-green-300", description: "Risks that have been resolved" },
@@ -46,14 +44,14 @@ function SeverityBadge({ severity }) {
   );
 }
 
-function LinkedIssueBadges({ issues }) {
+function LinkedIssueBadges({ issues, jiraBaseUrl }) {
   if (!issues || issues.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-1 mt-1">
       {issues.map((key) => (
         <a
           key={key}
-          href={`${JIRA_BASE_URL}/browse/${key}`}
+          href={`${jiraBaseUrl}/browse/${key}`}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-block px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-xs font-mono hover:bg-blue-100 transition-colors"
@@ -66,22 +64,30 @@ function LinkedIssueBadges({ issues }) {
 }
 
 export default function RoamPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const [risks, setRisks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({ ...EMPTY_FORM });
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [ticketData, setTicketData] = useState(null);
 
   useEffect(() => {
     loadRisks();
   }, []);
 
+  useEffect(() => {
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
+
   // Load ticket context for AI analysis
   useEffect(() => {
-    fetchIssues(jql).then(setTicketData).catch(() => {});
+    if (jql) fetchIssues(jql).then(setTicketData).catch(() => {});
   }, [jql]);
 
   async function loadRisks() {
@@ -326,6 +332,20 @@ export default function RoamPage() {
         </form>
       )}
 
+      {!loading && risks.length === 0 && !ticketData && !jql && (
+        <div className="text-center py-20 text-gray-400">
+          <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+          </svg>
+          <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+          <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+          <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+          <p className="text-xs text-gray-400 mt-4">
+            Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+          </p>
+        </div>
+      )}
+
       {/* Kanban Board */}
       {loading ? (
         <div className="text-center py-12 text-gray-500">Loading risks...</div>
@@ -376,7 +396,7 @@ export default function RoamPage() {
                       )}
 
                       {/* Linked Issues */}
-                      <LinkedIssueBadges issues={risk.linkedIssues} />
+                      <LinkedIssueBadges issues={risk.linkedIssues} jiraBaseUrl={jiraBaseUrl} />
 
                       {/* Actions */}
                       <div className="flex items-center justify-between mt-3 pt-2 border-t border-gray-100">

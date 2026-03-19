@@ -5,9 +5,7 @@ import { fetchStandup } from "../../lib/api";
 import AiCoachPanel from "../../components/AiCoachPanel";
 import JqlBar from "../../components/JqlBar";
 import { toast } from "../../components/Toaster";
-
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
-const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = SCRUM ORDER BY status ASC, updated DESC";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 const TIME_RANGES = [
   { label: "24h", hours: 24 },
@@ -58,10 +56,10 @@ function StatusBadge({ status, statusCategory }) {
   );
 }
 
-function IssueLink({ issueKey }) {
+function IssueLink({ issueKey, jiraBaseUrl }) {
   return (
     <a
-      href={`${JIRA_BASE_URL}/browse/${issueKey}`}
+      href={`${jiraBaseUrl}/browse/${issueKey}`}
       target="_blank"
       rel="noopener noreferrer"
       className="text-xs font-mono font-semibold text-blue-600 hover:underline shrink-0"
@@ -113,7 +111,7 @@ function DetailedIssueCard({ issue, showComments = true }) {
   return (
     <div className="border border-gray-100 rounded-lg p-3 hover:bg-gray-50/50 transition-colors">
       <div className="flex items-start gap-2">
-        <IssueLink issueKey={issue.key} />
+        <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
         <div className="flex-1 min-w-0">
           <p className="text-xs text-gray-800 leading-snug">{issue.summary}</p>
           {issue.epicName && (
@@ -267,7 +265,7 @@ function CommentFeed({ comments }) {
         {displayed.map((c, i) => (
           <div key={i} className="border-b border-gray-50 pb-2 last:border-0 last:pb-0">
             <div className="flex items-center gap-2 mb-1">
-              <IssueLink issueKey={c.issueKey} />
+              <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={c.issueKey} />
               <span className="text-[10px] text-gray-400 truncate flex-1">{c.issueSummary}</span>
               <span className="text-[10px] text-gray-400 shrink-0">{timeAgo(c.created)}</span>
             </div>
@@ -382,7 +380,7 @@ function StandupContent({ data, hours, prompts }) {
                 {data.approachingDue.map((issue) => (
                   <div key={issue.key} className="border border-gray-100 rounded-lg p-3 hover:bg-gray-50/50 transition-colors">
                     <div className="flex items-start gap-2">
-                      <IssueLink issueKey={issue.key} />
+                      <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
                       <p className="text-xs text-gray-800 flex-1 min-w-0">{issue.summary}</p>
                       <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
                         issue.daysLeft <= 1 ? "bg-red-100 text-red-700" : "bg-orange-100 text-orange-700"
@@ -419,7 +417,7 @@ function StandupContent({ data, hours, prompts }) {
                 {data.stale.map((issue) => (
                   <div key={issue.key} className="border border-gray-100 rounded-lg p-3 hover:bg-gray-50/50 transition-colors">
                     <div className="flex items-start gap-2">
-                      <IssueLink issueKey={issue.key} />
+                      <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
                       <p className="text-xs text-gray-800 flex-1 min-w-0">{issue.summary}</p>
                       <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 shrink-0">
                         {issue.staleDays}d stale
@@ -485,7 +483,7 @@ function StandupContent({ data, hours, prompts }) {
                 {data.newlyCreated.map((issue) => (
                   <div key={issue.key} className="border border-gray-100 rounded-lg p-2.5 hover:bg-gray-50/50 transition-colors">
                     <div className="flex items-start gap-2">
-                      <IssueLink issueKey={issue.key} />
+                      <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
                       <p className="text-xs text-gray-800 flex-1 min-w-0 truncate">{issue.summary}</p>
                     </div>
                     <div className="flex items-center gap-2 mt-1.5 text-[10px] text-gray-500">
@@ -583,16 +581,25 @@ Format clearly with headers. This should be comprehensive enough to replace a li
 // ─── Main Page ─────────────────────────────────────────────
 
 export default function StandupPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [hours, setHours] = useState(24);
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [activeTab, setActiveTab] = useState("all");
+
+  useEffect(() => {
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      if (!jql) { setLoading(false); return; }
       setLoading(true);
       try {
         const result = await fetchStandup(hours, jql);
@@ -699,6 +706,20 @@ export default function StandupPage() {
                 </button>
               ))}
             </div>
+          </div>
+        )}
+
+        {!loading && !data && !jql && (
+          <div className="text-center py-20 text-gray-400">
+            <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+            <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+            <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+            <p className="text-xs text-gray-400 mt-4">
+              Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+            </p>
           </div>
         )}
 

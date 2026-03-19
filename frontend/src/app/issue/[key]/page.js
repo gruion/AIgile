@@ -5,8 +5,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { fetchIssueDetail } from "../../../lib/api";
 import IssueHoverCard from "../../../components/IssueHoverCard";
-
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../../context/AppConfigContext";
 
 // ─── Prompt builder ──────────────────────────────────────
 
@@ -398,7 +397,7 @@ function Badge({ children, color }) {
   return <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${color}`}>{children}</span>;
 }
 
-function RawIssueDetail({ issue }) {
+function RawIssueDetail({ issue, jiraBaseUrl }) {
   return (
     <div className="space-y-5">
       {/* Key info grid */}
@@ -469,7 +468,7 @@ function RawIssueDetail({ issue }) {
             {issue.links.map((l, i) => (
               <div key={i} className="flex items-center gap-2 text-xs">
                 <span className="text-gray-400 w-24 shrink-0">{l.direction}</span>
-                <a href={`${JIRA_BASE_URL}/browse/${l.key}`} target="_blank" rel="noopener noreferrer" className="font-mono font-bold text-blue-600 hover:underline">{l.key}</a>
+                <a href={`${jiraBaseUrl}/browse/${l.key}`} target="_blank" rel="noopener noreferrer" className="font-mono font-bold text-blue-600 hover:underline">{l.key}</a>
                 <span className="text-gray-700 flex-1 truncate">{l.summary}</span>
                 <Badge color={STATUS_COLORS[l.status === "Done" ? "done" : "new"]}>{l.status}</Badge>
               </div>
@@ -485,7 +484,7 @@ function RawIssueDetail({ issue }) {
           <div className="space-y-1.5">
             {issue.subtasks.map((s, i) => (
               <div key={i} className="flex items-center gap-2 text-xs">
-                <a href={`${JIRA_BASE_URL}/browse/${s.key}`} target="_blank" rel="noopener noreferrer" className="font-mono font-bold text-blue-600 hover:underline w-20 shrink-0">{s.key}</a>
+                <a href={`${jiraBaseUrl}/browse/${s.key}`} target="_blank" rel="noopener noreferrer" className="font-mono font-bold text-blue-600 hover:underline w-20 shrink-0">{s.key}</a>
                 <span className="text-gray-700 flex-1 truncate">{s.summary}</span>
                 <Badge color={STATUS_COLORS[s.statusCategory] || STATUS_COLORS.new}>{s.status}</Badge>
               </div>
@@ -539,6 +538,7 @@ function RawIssueDetail({ issue }) {
 // ─── Page ────────────────────────────────────────────────
 
 export default function IssueDetailPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const params = useParams();
   const issueKey = params.key;
 
@@ -642,7 +642,7 @@ export default function IssueDetailPage() {
               </div>
             </div>
             <a
-              href={`${JIRA_BASE_URL}/browse/${issueKey}`}
+              href={`${jiraBaseUrl}/browse/${issueKey}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md"
@@ -698,7 +698,7 @@ export default function IssueDetailPage() {
 
         {!loading && issue && (
           <>
-            {tab === "data" && <RawIssueDetail issue={issue} />}
+            {tab === "data" && <RawIssueDetail issue={issue} jiraBaseUrl={jiraBaseUrl} />}
 
             {tab === "prompt" && (
               <div className="space-y-4">

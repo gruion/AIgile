@@ -7,8 +7,7 @@ import IssueHoverCard from "../../components/IssueHoverCard";
 import { fetchIssues, fetchPiOverview, fetchConfig } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 import AiCoachPanel from "../../components/AiCoachPanel";
-
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 // ─── Color palette ──────────────────────────────────────
 const EPIC_COLORS = [
@@ -146,6 +145,7 @@ function getIssueDate(issue, mode) {
 }
 
 function CalendarView({ issues }) {
+  const { jiraBaseUrl } = useAppConfig();
   const today = startOfDay(new Date());
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -243,8 +243,8 @@ function CalendarView({ issues }) {
                     const sc = STATUS_COLORS[issue.statusCategory] || STATUS_COLORS.new;
                     return (
                       <div key={issue.key} className={`text-[10px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text} truncate`}>
-                        <IssueHoverCard issue={issue} jiraBaseUrl={JIRA_BASE_URL}>
-                          <a href={`${JIRA_BASE_URL}/browse/${issue.key}`} target="_blank" rel="noopener noreferrer" className="font-medium hover:underline cursor-pointer">{issue.key}</a>
+                        <IssueHoverCard issue={issue} jiraBaseUrl={jiraBaseUrl}>
+                          <a href={`${jiraBaseUrl}/browse/${issue.key}`} target="_blank" rel="noopener noreferrer" className="font-medium hover:underline cursor-pointer">{issue.key}</a>
                         </IssueHoverCard> {issue.summary}
                       </div>
                     );
@@ -299,6 +299,7 @@ const PLANNING_SORT_FN = (a, b, key) => {
 };
 
 function TaskListView({ issues }) {
+  const { jiraBaseUrl } = useAppConfig();
   const [filterStatus, setFilterStatus] = useState("all");
 
   const filtered = useMemo(() => {
@@ -313,8 +314,8 @@ function TaskListView({ issues }) {
       key: "key", label: "Key", sortable: true, defaultWidth: 90, minWidth: 70,
       className: "font-mono text-blue-600 font-medium whitespace-nowrap",
       render: (row) => (
-        <IssueHoverCard issue={row} jiraBaseUrl={JIRA_BASE_URL}>
-          <a href={`${JIRA_BASE_URL}/browse/${row.key}`} target="_blank" rel="noopener noreferrer" className="hover:underline">{row.key}</a>
+        <IssueHoverCard issue={row} jiraBaseUrl={jiraBaseUrl}>
+          <a href={`${jiraBaseUrl}/browse/${row.key}`} target="_blank" rel="noopener noreferrer" className="hover:underline">{row.key}</a>
         </IssueHoverCard>
       ),
     },
@@ -579,7 +580,6 @@ function PlanningInsightsPanel({ issues }) {
 }
 
 // ─── Main Page ──────────────────────────────────────────
-const DEFAULT_JQL = "project = TEAM ORDER BY status ASC, updated DESC";
 
 const TABS = [
   { id: "list", label: "Task List", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" },
@@ -587,13 +587,14 @@ const TABS = [
 ];
 
 export default function PlanningPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const [tab, setTab] = useState("list");
   const [scope, setScope] = useState("project"); // "project" or "pi"
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [piEnabled, setPiEnabled] = useState(false);
   const [piTeams, setPiTeams] = useState([]);
   const [selectedTeam, setSelectedTeam] = useState("all");
@@ -607,8 +608,16 @@ export default function PlanningPage() {
     }).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
+
   // Load data based on scope
   useEffect(() => {
+    if (!jql) { setLoading(false); return; }
     async function load() {
       setLoading(true);
       setError(null);
@@ -801,7 +810,21 @@ export default function PlanningPage() {
           </>
         )}
 
-        {!loading && filteredIssues.length === 0 && !error && (
+        {!loading && !data && !error && !jql && (
+          <div className="text-center py-20 text-gray-400">
+            <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+            <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+            <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+            <p className="text-xs text-gray-400 mt-4">
+              Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+            </p>
+          </div>
+        )}
+
+        {!loading && filteredIssues.length === 0 && !error && jql && (
           <div className="text-center py-12 text-gray-400">
             <p className="text-lg mb-2">No issues found</p>
             <p className="text-sm">{scope === "project" ? "Try adjusting your JQL query" : "No PI data available"}</p>

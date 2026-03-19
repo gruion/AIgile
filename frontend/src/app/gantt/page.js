@@ -7,8 +7,7 @@ import IssueHoverCard from "../../components/IssueHoverCard";
 import { fetchIssues } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 import AiCoachPanel from "../../components/AiCoachPanel";
-
-const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+import { useAppConfig } from "../../context/AppConfigContext";
 
 // ─── Color palette for epics ────────────────────────────
 
@@ -264,14 +263,13 @@ function Tooltip({ row }) {
 
 // ─── Main Page ──────────────────────────────────────────
 
-const DEFAULT_JQL = "project = TEAM ORDER BY status ASC, updated DESC";
-
 export default function GanttPage() {
+  const { defaultJql, jiraBaseUrl } = useAppConfig();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [jql, setJql] = useState(DEFAULT_JQL);
-  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
   const [hoveredRow, setHoveredRow] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [hiddenEpics, setHiddenEpics] = useState(new Set());
@@ -279,6 +277,14 @@ export default function GanttPage() {
   const containerRef = useRef(null);
 
   useEffect(() => {
+    if (defaultJql) {
+      setJql((prev) => prev || defaultJql);
+      setInputJql((prev) => prev || defaultJql);
+    }
+  }, [defaultJql]);
+
+  useEffect(() => {
+    if (!jql) { setLoading(false); return; }
     async function load() {
       setLoading(true);
       setError(null);
@@ -515,8 +521,8 @@ export default function GanttPage() {
                       className="flex items-center gap-2 px-3 border-b border-gray-100 hover:bg-gray-50"
                       style={{ height: `${ROW_HEIGHT}px` }}
                     >
-                      <IssueHoverCard issue={item} jiraBaseUrl={JIRA_BASE_URL}>
-                        <a href={`${JIRA_BASE_URL}/browse/${item.key}`} target="_blank" rel="noopener noreferrer" className="text-[10px] font-mono text-blue-600 w-16 shrink-0 hover:underline">{item.key}</a>
+                      <IssueHoverCard issue={item} jiraBaseUrl={jiraBaseUrl}>
+                        <a href={`${jiraBaseUrl}/browse/${item.key}`} target="_blank" rel="noopener noreferrer" className="text-[10px] font-mono text-blue-600 w-16 shrink-0 hover:underline">{item.key}</a>
                       </IssueHoverCard>
                       <span className="text-xs text-gray-700 truncate flex-1">{item.summary}</span>
                       <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${
@@ -635,7 +641,21 @@ export default function GanttPage() {
           </div>
         )}
 
-        {!loading && gantt && gantt.rows.length === 0 && (
+        {!loading && !data && !error && !jql && (
+          <div className="text-center py-20 text-gray-400">
+            <svg className="mx-auto w-12 h-12 mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <p className="text-lg font-medium text-gray-500 mb-2">Enter a JQL query to get started</p>
+            <p className="text-sm mb-4">Type a query in the search bar above, for example:</p>
+            <code className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-md">project = MYPROJECT ORDER BY status ASC, updated DESC</code>
+            <p className="text-xs text-gray-400 mt-4">
+              Or set a default JQL in <a href="/settings" className="text-blue-500 hover:underline font-medium">Settings</a> so pages load automatically.
+            </p>
+          </div>
+        )}
+
+        {!loading && gantt && gantt.rows.length === 0 && jql && (
           <div className="text-center py-12 text-gray-400">
             <p className="text-lg mb-2">No issues to display</p>
             <p className="text-sm">Try adjusting your JQL query</p>

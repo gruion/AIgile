@@ -15,11 +15,11 @@ app.use(express.json());
 
 // ─── Config ──────────────────────────────────────────────
 const PORT = process.env.API_PORT || process.env.PORT || 3011;
-const JIRA_BASE_URL = process.env.JIRA_BASE_URL || "http://localhost:9080";
-const JIRA_USERNAME = process.env.JIRA_USERNAME || "admin";
+const JIRA_BASE_URL = process.env.JIRA_BASE_URL || "";
+const JIRA_USERNAME = process.env.JIRA_USERNAME || "";
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN || "";
-const JIRA_PROJECT_KEY = process.env.JIRA_PROJECT_KEY || "TEAM";
-const DEFAULT_JQL = process.env.JIRA_DEFAULT_JQL || `project = ${JIRA_PROJECT_KEY} ORDER BY status ASC, updated DESC`;
+const JIRA_PROJECT_KEY = process.env.JIRA_PROJECT_KEY || "";
+const DEFAULT_JQL = process.env.JIRA_DEFAULT_JQL || "";
 
 // ─── Persistent Config (file → env vars → defaults) ──────────
 const CONFIG_DIR = process.env.CONFIG_DIR || resolve(__dirname, "../data");
@@ -103,7 +103,7 @@ if (JIRA_SERVERS.length === 0 && JIRA_API_TOKEN) {
 if (TEAMS.length === 0 && JIRA_SERVERS.length > 0) {
   TEAMS.push({
     id: "default", name: "Default Team", serverId: JIRA_SERVERS[0].id,
-    projectKey: JIRA_SERVERS[0].projects?.[0] || "TEAM", boardId: null, color: "#3B82F6",
+    projectKey: JIRA_SERVERS[0].projects?.[0] || "", boardId: null, color: "#3B82F6",
   });
 }
 
@@ -127,7 +127,7 @@ function stripOrderBy(jql) {
 // Helper: get browser-accessible URL for a server (for clickable links)
 // JIRA_BASE_URL inside Docker is the internal hostname (http://jira:8080).
 // JIRA_BROWSER_URL should be set to the external URL reachable from the browser.
-const JIRA_BROWSER_URL = process.env.JIRA_BROWSER_URL || process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
+const JIRA_BROWSER_URL = process.env.JIRA_BROWSER_URL || process.env.NEXT_PUBLIC_JIRA_BASE_URL || "";
 function getBrowserUrl(server) {
   return server.browserUrl || JIRA_BROWSER_URL;
 }
@@ -141,9 +141,42 @@ function jiraHeadersFor(server) {
   };
 }
 
+// Translate low-level fetch errors into actionable messages
+function describeNetworkError(err, url) {
+  const code = err.cause?.code || err.code;
+  const hostname = (() => { try { return new URL(url).hostname; } catch { return url; } })();
+  switch (code) {
+    case "ENOTFOUND": return `DNS lookup failed — cannot resolve hostname "${hostname}"`;
+    case "ECONNREFUSED": return `Connection refused at ${url} — is the server running?`;
+    case "ECONNRESET": return `Connection reset by ${hostname} — server closed the connection unexpectedly`;
+    case "ETIMEDOUT": return `Connection timed out reaching ${hostname}`;
+    case "ECONNABORTED": return `Request aborted — ${hostname} took too long to respond`;
+    case "DEPTH_ZERO_SELF_SIGNED_CERT": return `SSL error: self-signed certificate at ${hostname}. Set NODE_TLS_REJECT_UNAUTHORIZED=0 or install the CA`;
+    case "UNABLE_TO_VERIFY_LEAF_SIGNATURE": return `SSL error: cannot verify certificate chain for ${hostname}. Missing intermediate CA?`;
+    case "CERT_HAS_EXPIRED": return `SSL error: certificate has expired for ${hostname}`;
+    case "ERR_TLS_CERT_ALTNAME_INVALID": return `SSL error: certificate hostname mismatch — cert does not cover "${hostname}"`;
+    case "UNABLE_TO_GET_ISSUER_CERT_LOCALLY": return `SSL error: unknown CA for ${hostname}. Set NODE_EXTRA_CA_CERTS or NODE_TLS_REJECT_UNAUTHORIZED=0`;
+    default: break;
+  }
+  // Check cause message for additional SSL clues
+  const causeMsg = (err.cause?.message || "").toLowerCase();
+  if (causeMsg.includes("self-signed") || causeMsg.includes("self_signed"))
+    return `SSL error: self-signed certificate at ${hostname}. Set NODE_TLS_REJECT_UNAUTHORIZED=0 or install the CA`;
+  if (causeMsg.includes("certificate") || causeMsg.includes("ssl") || causeMsg.includes("tls"))
+    return `SSL/TLS error connecting to ${hostname}: ${err.cause?.message}`;
+  if (err.message === "fetch failed")
+    return `Cannot reach server at ${url} — check the URL, network, firewall, and SSL settings`;
+  return `${err.message}${err.cause ? ` (${err.cause.message || err.cause.code})` : ""}`;
+}
+
 async function jiraFetchFrom(server, path) {
   const url = `${server.url}/rest/api/2${path}`;
-  const res = await fetch(url, { headers: jiraHeadersFor(server) });
+  let res;
+  try {
+    res = await fetch(url, { headers: jiraHeadersFor(server) });
+  } catch (err) {
+    throw new Error(`${describeNetworkError(err, server.url)} [server: ${server.name}]`);
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Jira API ${res.status} (${server.name}): ${text}`);
@@ -153,7 +186,12 @@ async function jiraFetchFrom(server, path) {
 
 async function jiraFetchAgileFrom(server, path) {
   const url = `${server.url}/rest/agile/1.0${path}`;
-  const res = await fetch(url, { headers: jiraHeadersFor(server) });
+  let res;
+  try {
+    res = await fetch(url, { headers: jiraHeadersFor(server) });
+  } catch (err) {
+    throw new Error(`${describeNetworkError(err, server.url)} [server: ${server.name}]`);
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Jira Agile API ${res.status} (${server.name}): ${text}`);
@@ -316,10 +354,15 @@ const jiraHeaders = () => jiraHeadersFor(defaultServer());
 async function jiraFetch(path, serverId) {
   const srv = resolveServer(serverId);
   const url = `${srv.url}/rest/api/2${path}`;
-  const res = await fetch(url, { headers: jiraHeadersFor(srv) });
+  let res;
+  try {
+    res = await fetch(url, { headers: jiraHeadersFor(srv) });
+  } catch (err) {
+    throw new Error(`${describeNetworkError(err, srv.url)} [server: ${srv.name}]`);
+  }
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Jira API ${res.status}: ${text}`);
+    throw new Error(`Jira API ${res.status} (${srv.name}): ${text}`);
   }
   return res.json();
 }
@@ -327,10 +370,15 @@ async function jiraFetch(path, serverId) {
 async function jiraFetchAgile(path, serverId) {
   const srv = resolveServer(serverId);
   const url = `${srv.url}/rest/agile/1.0${path}`;
-  const res = await fetch(url, { headers: jiraHeadersFor(srv) });
+  let res;
+  try {
+    res = await fetch(url, { headers: jiraHeadersFor(srv) });
+  } catch (err) {
+    throw new Error(`${describeNetworkError(err, srv.url)} [server: ${srv.name}]`);
+  }
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Jira Agile API ${res.status}: ${text}`);
+    throw new Error(`Jira Agile API ${res.status} (${srv.name}): ${text}`);
   }
   return res.json();
 }
@@ -552,6 +600,7 @@ app.get("/filters", async (req, res) => {
 app.get("/issues", async (req, res) => {
   try {
     const jql = req.query.jql || (req.query.project ? `project = ${req.query.project} ORDER BY status ASC, updated DESC` : DEFAULT_JQL);
+    if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
 
     const epicFields = EPIC_LINK_FIELDS.join(",");
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged,issuelinks`;
@@ -988,6 +1037,7 @@ function computeQualityScore(issue) {
 app.get("/analytics", async (req, res) => {
   try {
     const jql = req.query.jql || (req.query.project ? `project = ${req.query.project} ORDER BY status ASC, updated DESC` : DEFAULT_JQL);
+    if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
     const epicFields = EPIC_LINK_FIELDS.join(",");
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged`;
 
@@ -1416,6 +1466,7 @@ app.post("/ai/summarize-board", async (req, res) => {
 app.get("/hierarchy", async (req, res) => {
   try {
     const jql = req.query.jql || (req.query.project ? `project = ${req.query.project} ORDER BY status ASC, updated DESC` : DEFAULT_JQL);
+    if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
     const epicFields = EPIC_LINK_FIELDS.join(",");
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged,subtasks`;
 
@@ -1688,7 +1739,15 @@ function configResponse() {
 
 // Lightweight status check for frontend setup guard
 app.get("/config/status", (req, res) => {
-  res.json({ needsSetup: needsSetup(), configSource, serverCount: JIRA_SERVERS.length, teamCount: TEAMS.length });
+  const primaryServer = JIRA_SERVERS[0];
+  res.json({
+    needsSetup: needsSetup(),
+    configSource,
+    serverCount: JIRA_SERVERS.length,
+    teamCount: TEAMS.length,
+    defaultJql: DEFAULT_JQL,
+    browserUrl: primaryServer ? getBrowserUrl(primaryServer) : "",
+  });
 });
 
 // Test connection to a Jira server (without saving)
@@ -1725,11 +1784,7 @@ app.post("/config/test-connection", async (req, res) => {
     const user = await resp.json();
     return res.json({ ok: true, displayName: user.displayName, emailAddress: user.emailAddress });
   } catch (err) {
-    const msg = err.cause?.code === "ENOTFOUND" ? `Cannot resolve hostname: ${new URL(url).hostname}`
-      : err.cause?.code === "ECONNREFUSED" ? `Connection refused: ${url}`
-      : err.message === "fetch failed" ? `Cannot reach server at ${url}`
-      : err.message;
-    return res.json({ ok: false, error: msg });
+    return res.json({ ok: false, error: describeNetworkError(err, url) });
   }
 });
 
@@ -1810,7 +1865,7 @@ app.post("/config/reset", (req, res) => {
   }
   if (TEAMS.length === 0 && JIRA_SERVERS.length > 0) {
     TEAMS.push({ id: "default", name: "Default Team", serverId: JIRA_SERVERS[0].id,
-      projectKey: JIRA_SERVERS[0].projects?.[0] || "TEAM", boardId: null, color: "#3B82F6" });
+      projectKey: JIRA_SERVERS[0].projects?.[0] || "", boardId: null, color: "#3B82F6" });
   }
   configSource = JIRA_SERVERS.length > 0 ? "env vars" : "defaults";
   res.json(configResponse());
@@ -3599,6 +3654,7 @@ app.get("/velocity", async (req, res) => {
 app.get("/flow/cfd", async (req, res) => {
   try {
     const jql = req.query.jql || DEFAULT_JQL;
+    if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
     const days = parseInt(req.query.days) || 30;
     const fieldsStr = "status,created,updated,resolutiondate";
     const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
@@ -3641,7 +3697,8 @@ app.get("/flow/cfd", async (req, res) => {
 // Cycle time scatterplot data
 app.get("/flow/cycle-time", async (req, res) => {
   try {
-    const jql = req.query.jql || `project = ${JIRA_PROJECT_KEY} AND statusCategory = Done ORDER BY resolutiondate DESC`;
+    const jql = req.query.jql || (JIRA_PROJECT_KEY ? `project = ${JIRA_PROJECT_KEY} AND statusCategory = Done ORDER BY resolutiondate DESC` : "");
+    if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate";
     const data = await jiraSearchAll(jql, fieldsStr, 200, "", req.query.serverId);
 
@@ -3681,6 +3738,7 @@ app.get("/flow/cycle-time", async (req, res) => {
 app.get("/flow/metrics", async (req, res) => {
   try {
     const jql = req.query.jql || DEFAULT_JQL;
+    if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate";
     const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
     const now = Date.now();
@@ -3748,6 +3806,7 @@ app.get("/standup", async (req, res) => {
   try {
     const hours = parseInt(req.query.hours) || 24;
     const jql = req.query.jql || DEFAULT_JQL;
+    if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate,comment,labels," + EPIC_LINK_FIELDS.join(",") + ",parent";
     const data = await jiraSearchAll(jql, fieldsStr, 100, "changelog", req.query.serverId);
 
@@ -4006,7 +4065,8 @@ app.get("/sprint-review", async (req, res) => {
 
 app.get("/dor", async (req, res) => {
   try {
-    const jql = req.query.jql || `project = ${JIRA_PROJECT_KEY} AND statusCategory != Done ORDER BY priority ASC, created DESC`;
+    const jql = req.query.jql || (JIRA_PROJECT_KEY ? `project = ${JIRA_PROJECT_KEY} AND statusCategory != Done ORDER BY priority ASC, created DESC` : "");
+    if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,duedate,description,labels,timetracking," + EPIC_LINK_FIELDS.join(",") + ",parent";
     const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
 
