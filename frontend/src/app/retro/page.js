@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import AiCoachPanel from "../../components/AiCoachPanel";
+import JqlBar from "../../components/JqlBar";
 import {
   fetchRetroSessions,
   createRetroSession,
@@ -10,11 +12,13 @@ import {
   deleteRetroSession,
   fetchAnalytics,
   fetchSettings,
+  fetchIssues,
+  fetchStandup,
 } from "../../lib/api";
 import { selectTicketsForPrompt, formatTicketForPrompt, trimPrompt } from "../../lib/prompt-utils";
-import { fetchIssues } from "../../lib/api";
 
 const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
+const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
 
 const CATEGORIES = [
   { key: "went_well", label: "Went Well", color: "bg-green-50 border-green-200", badge: "bg-green-100 text-green-700", icon: "\u2705" },
@@ -33,11 +37,11 @@ const COACH_TIPS = [
   { title: "Timebox Strictly", detail: "Keep retros to 60 minutes max. Use a timer: 10min review, 15min went-well, 15min to-improve, 15min actions, 5min wrap." },
 ];
 
-function buildRetroPrompt(analyticsData, entries, promptSettings) {
+function buildRetroPrompt(analyticsData, entries, ticketData, promptSettings) {
   const today = new Date().toISOString().split("T")[0];
   const lines = [];
 
-  lines.push("You are a senior Agile Coach facilitating a sprint retrospective. Analyze the team's board data AND their own retrospective feedback to produce actionable insights.");
+  lines.push("You are a senior Agile Coach facilitating a sprint retrospective. Analyze the team's board data, ticket-level details, AND their own retrospective feedback to produce deep, actionable insights.");
   lines.push("IMPORTANT: Return ONLY valid JSON, no markdown, no explanation, no code fences.");
   lines.push("");
   lines.push(`# Sprint Retrospective Analysis — ${today}`);
@@ -63,6 +67,114 @@ function buildRetroPrompt(analyticsData, entries, promptSettings) {
     lines.push("");
   }
 
+  // Ticket-level analysis data
+  if (ticketData) {
+    const epics = ticketData.epics || [];
+    const noEpic = ticketData.noEpic || [];
+    const allIssues = [...epics.flatMap((e) => e.issues || []), ...noEpic];
+
+    if (allIssues.length > 0) {
+      lines.push("## Ticket-Level Data (for evidence-based retro)");
+      lines.push("");
+
+      // Completed work
+      const done = allIssues.filter((i) => i.statusCategory === "done");
+      if (done.length > 0) {
+        lines.push("### Completed This Sprint");
+        done.forEach((i) => {
+          lines.push(`- ${i.key}: ${i.summary} (${i.assigneeName || "unassigned"}) — ${i.issueType || "Task"}${i.dueDate ? `, due: ${i.dueDate}` : ""}`);
+        });
+        lines.push("");
+      }
+
+      // In progress (still open)
+      const inProgress = allIssues.filter((i) => i.statusCategory === "indeterminate");
+      if (inProgress.length > 0) {
+        lines.push("### Still In Progress (not completed)");
+        inProgress.forEach((i) => {
+          lines.push(`- ${i.key}: ${i.summary} (${i.assigneeName || "unassigned"}) — status: ${i.status}${i.dueDate ? `, due: ${i.dueDate}` : ""}`);
+        });
+        lines.push("");
+      }
+
+      // Overdue items
+      const overdue = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "overdue"));
+      if (overdue.length > 0) {
+        lines.push("### Overdue Items");
+        overdue.forEach((i) => {
+          lines.push(`- ${i.key}: ${i.summary} (${i.assigneeName || "unassigned"}) — due: ${i.dueDate}, status: ${i.status}`);
+        });
+        lines.push("");
+      }
+
+      // Stale items
+      const stale = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "stale"));
+      if (stale.length > 0) {
+        lines.push("### Stale Items (no update in 7+ days)");
+        stale.forEach((i) => {
+          lines.push(`- ${i.key}: ${i.summary} (${i.assigneeName || "unassigned"}) — last updated: ${i.updated ? new Date(i.updated).toISOString().split("T")[0] : "unknown"}`);
+        });
+        lines.push("");
+      }
+
+      // Unassigned
+      const unassigned = allIssues.filter((i) => !i.assigneeName && i.statusCategory !== "done");
+      if (unassigned.length > 0) {
+        lines.push("### Unassigned Open Items");
+        unassigned.forEach((i) => {
+          lines.push(`- ${i.key}: ${i.summary} — status: ${i.status}, priority: ${i.priority || "Medium"}`);
+        });
+        lines.push("");
+      }
+
+      // Blockers
+      const blocked = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "blocked" || f.type === "blocker"));
+      if (blocked.length > 0) {
+        lines.push("### Blocked / Blocker Items");
+        blocked.forEach((i) => {
+          const flags = i.urgencyFlags.filter((f) => f.type === "blocked" || f.type === "blocker").map((f) => f.label).join(", ");
+          lines.push(`- ${i.key}: ${i.summary} — ${flags}`);
+        });
+        lines.push("");
+      }
+
+      // Recent comments (last comment per issue, for communication analysis)
+      const withComments = allIssues.filter((i) => i.lastComment);
+      if (withComments.length > 0) {
+        lines.push("### Recent Comments (communication signals)");
+        withComments.slice(0, 15).forEach((i) => {
+          const body = i.lastComment.body?.substring(0, 120) || "";
+          lines.push(`- ${i.key} [${i.lastComment.author}]: ${body}`);
+        });
+        lines.push("");
+      }
+
+      // Summary stats
+      lines.push("### Sprint Stats from Tickets");
+      lines.push(`- Total: ${allIssues.length} | Done: ${done.length} | In Progress: ${inProgress.length} | To Do: ${allIssues.filter((i) => i.statusCategory === "new").length}`);
+      lines.push(`- Overdue: ${overdue.length} | Stale: ${stale.length} | Blocked: ${blocked.length} | Unassigned: ${unassigned.length}`);
+
+      // Workload distribution
+      const workload = {};
+      allIssues.filter((i) => i.assigneeName).forEach((i) => {
+        workload[i.assigneeName] = (workload[i.assigneeName] || 0) + 1;
+      });
+      if (Object.keys(workload).length > 0) {
+        lines.push(`- Workload: ${Object.entries(workload).map(([name, count]) => `${name}: ${count}`).join(", ")}`);
+      }
+
+      // Epic progress
+      if (epics.length > 0) {
+        lines.push("");
+        lines.push("### Epic Progress");
+        epics.forEach((e) => {
+          lines.push(`- ${e.key}: ${e.name} — ${e.progress}% done (${e.stats?.done || 0}/${e.issues?.length || 0}), ${e.stats?.criticalCount || 0} critical, ${e.stats?.warningCount || 0} warnings`);
+        });
+      }
+      lines.push("");
+    }
+  }
+
   // Team feedback
   if (entries.length > 0) {
     lines.push("## Team Feedback");
@@ -80,27 +192,57 @@ function buildRetroPrompt(analyticsData, entries, promptSettings) {
 
   lines.push("---");
   lines.push("");
-  lines.push("Based on BOTH the board metrics AND team feedback, return this JSON:");
+  lines.push("Based on the board metrics, ticket-level data, AND team feedback, return this JSON:");
   lines.push(`{
-  "sprint_summary": "2-3 sentence summary of how the sprint went, referencing specific metrics",
+  "sprint_summary": "2-3 sentence summary of how the sprint went, referencing specific ticket keys and metrics",
   "health_assessment": {
     "score": 0-100,
     "status": "healthy | needs_attention | critical",
     "key_metrics": ["list of 3-5 key observations from the data"]
   },
+  "what_went_well": [
+    {
+      "title": "Specific thing that went well",
+      "evidence": "Which tickets/metrics prove this",
+      "team_alignment": "What team members said that confirms this (if any)"
+    }
+  ],
+  "what_went_wrong": [
+    {
+      "title": "Specific problem or failure",
+      "evidence": "Which tickets/metrics prove this (reference keys)",
+      "root_cause": "Why this happened (process, communication, technical, planning)",
+      "impact": "high | medium | low"
+    }
+  ],
   "themes": [
     {
       "title": "Theme name (e.g., 'WIP overload', 'Communication gaps')",
       "description": "What the data and feedback tell us",
-      "evidence_from_data": "Specific metrics that support this theme",
+      "evidence_from_data": "Specific metrics and ticket keys that support this theme",
       "evidence_from_team": "What team members said about this",
       "impact": "high | medium | low",
       "category": "process | technical | communication | planning | culture"
     }
   ],
-  "action_items": [
+  "coaching_questions": [
+    "Powerful question to ask the team to drive deeper reflection (e.g., 'What made us decide to take on X when Y was already in progress?')",
+    "Another coaching question based on the specific data patterns observed"
+  ],
+  "improvement_suggestions": [
     {
       "title": "Specific, actionable improvement",
+      "description": "How to implement this change, step by step",
+      "addresses": "Which 'what went wrong' item or theme this fixes",
+      "expected_impact": "What improvement we expect to see",
+      "measurable_outcome": "How we'll know it worked (specific metric)",
+      "priority": 1,
+      "effort": "low | medium | high"
+    }
+  ],
+  "action_items": [
+    {
+      "title": "Concrete next step with a clear owner suggestion",
       "description": "How to implement this change",
       "expected_impact": "What improvement we expect to see",
       "priority": 1,
@@ -108,12 +250,309 @@ function buildRetroPrompt(analyticsData, entries, promptSettings) {
       "measurable_outcome": "How we'll know it worked (specific metric)"
     }
   ],
-  "celebrations": ["List 2-3 things to celebrate based on the data and feedback"],
-  "warning_signs": ["List potential risks or anti-patterns the coach spotted"],
-  "next_sprint_focus": "One sentence describing the team's top priority for next sprint"
+  "celebrations": ["List 2-3 things to celebrate, referencing specific ticket keys and people"],
+  "warning_signs": ["List potential risks or anti-patterns the coach spotted from the data"],
+  "team_dynamics_observations": ["Observations about workload balance, communication patterns, collaboration based on the ticket data"],
+  "next_sprint_focus": "One sentence describing the team's top priority for next sprint based on what this retro reveals"
 }`);
 
   return lines.join("\n");
+}
+
+function buildTicketSummaryForCoach(ticketData) {
+  const epics = ticketData.epics || [];
+  const noEpic = ticketData.noEpic || [];
+  const allIssues = [...epics.flatMap((e) => e.issues || []), ...noEpic];
+  const done = allIssues.filter((i) => i.statusCategory === "done");
+  const inProgress = allIssues.filter((i) => i.statusCategory === "indeterminate");
+  const toDo = allIssues.filter((i) => i.statusCategory === "new");
+  const overdue = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "overdue"));
+  const stale = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "stale"));
+  const blocked = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "blocked" || f.type === "blocker"));
+  const unassigned = allIssues.filter((i) => !i.assigneeName && i.statusCategory !== "done");
+
+  const ticketDetail = (i) => ({
+    key: i.key,
+    summary: i.summary,
+    status: i.status,
+    assignee: i.assigneeName || "Unassigned",
+    type: i.issueType || "Task",
+    priority: i.priority || "—",
+    ...(i.dueDate && { dueDate: i.dueDate }),
+    ...(i.storyPoints && { points: i.storyPoints }),
+  });
+
+  return {
+    total: allIssues.length,
+    completionRate: allIssues.length > 0 ? Math.round((done.length / allIssues.length) * 100) : 0,
+    epicCount: epics.length,
+    counts: { done: done.length, inProgress: inProgress.length, toDo: toDo.length, overdue: overdue.length, stale: stale.length, blocked: blocked.length, unassigned: unassigned.length },
+    completed: done.map(ticketDetail),
+    stillInProgress: inProgress.map(ticketDetail),
+    overdue: overdue.map(ticketDetail),
+    stale: stale.map(ticketDetail),
+    blocked: blocked.map(ticketDetail),
+    unassigned: unassigned.map(ticketDetail),
+    workloadByAssignee: Object.entries(
+      allIssues.reduce((acc, i) => {
+        const name = i.assigneeName || "Unassigned";
+        acc[name] = (acc[name] || 0) + 1;
+        return acc;
+      }, {})
+    ).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+  };
+}
+
+function TicketAnalysisPanel({ ticketData, jiraBaseUrl }) {
+  const epics = ticketData.epics || [];
+  const noEpic = ticketData.noEpic || [];
+  const allIssues = [...epics.flatMap((e) => e.issues || []), ...noEpic];
+  const done = allIssues.filter((i) => i.statusCategory === "done");
+  const inProgress = allIssues.filter((i) => i.statusCategory === "indeterminate");
+  const overdue = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "overdue"));
+  const stale = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "stale"));
+  const blocked = allIssues.filter((i) => i.urgencyFlags?.some((f) => f.type === "blocked" || f.type === "blocker"));
+  const unassigned = allIssues.filter((i) => !i.assigneeName && i.statusCategory !== "done");
+
+  if (allIssues.length === 0) return null;
+
+  const completionRate = Math.round((done.length / allIssues.length) * 100);
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 className="text-sm font-semibold text-gray-800 mb-4">Sprint Ticket Analysis (for retro context)</h3>
+
+      {/* Stats grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-4">
+        <StatCard label="Total" value={allIssues.length} color="text-gray-700" />
+        <StatCard label="Done" value={done.length} color="text-green-700" bg="bg-green-50" />
+        <StatCard label="In Progress" value={inProgress.length} color="text-blue-700" bg="bg-blue-50" />
+        <StatCard label="Overdue" value={overdue.length} color="text-red-700" bg="bg-red-50" alert={overdue.length > 0} />
+        <StatCard label="Stale" value={stale.length} color="text-orange-700" bg="bg-orange-50" alert={stale.length > 0} />
+        <StatCard label="Blocked" value={blocked.length} color="text-red-700" bg="bg-red-50" alert={blocked.length > 0} />
+        <StatCard label="Unassigned" value={unassigned.length} color="text-purple-700" bg="bg-purple-50" alert={unassigned.length > 0} />
+      </div>
+
+      {/* Completion bar */}
+      <div className="flex items-center gap-3 mb-4">
+        <span className="text-xs text-gray-500">Completion:</span>
+        <div className="flex-1 bg-gray-100 rounded-full h-3 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${completionRate >= 80 ? "bg-green-500" : completionRate >= 50 ? "bg-blue-500" : "bg-amber-500"}`}
+            style={{ width: `${completionRate}%` }}
+          />
+        </div>
+        <span className="text-sm font-semibold text-gray-700">{completionRate}%</span>
+      </div>
+
+      {/* Quick insights */}
+      {(overdue.length > 0 || stale.length > 0 || blocked.length > 0) && (
+        <div className="space-y-2">
+          {overdue.length > 0 && (
+            <div className="text-xs text-red-700 bg-red-50 rounded-lg px-3 py-2">
+              <strong>Overdue:</strong> {overdue.map((i) => (
+                <a key={i.key} href={`${jiraBaseUrl}/browse/${i.key}`} target="_blank" rel="noopener noreferrer" className="font-mono hover:underline ml-1">{i.key}</a>
+              ))}
+            </div>
+          )}
+          {stale.length > 0 && (
+            <div className="text-xs text-orange-700 bg-orange-50 rounded-lg px-3 py-2">
+              <strong>Stale (7+ days):</strong> {stale.map((i) => (
+                <a key={i.key} href={`${jiraBaseUrl}/browse/${i.key}`} target="_blank" rel="noopener noreferrer" className="font-mono hover:underline ml-1">{i.key}</a>
+              ))}
+            </div>
+          )}
+          {blocked.length > 0 && (
+            <div className="text-xs text-red-700 bg-red-50 rounded-lg px-3 py-2">
+              <strong>Blocked:</strong> {blocked.map((i) => (
+                <a key={i.key} href={`${jiraBaseUrl}/browse/${i.key}`} target="_blank" rel="noopener noreferrer" className="font-mono hover:underline ml-1">{i.key}</a>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PROMPT_CAT_COLORS = {
+  process: { bg: "bg-purple-50", border: "border-purple-200", badge: "bg-purple-100 text-purple-700" },
+  workflow: { bg: "bg-blue-50", border: "border-blue-200", badge: "bg-blue-100 text-blue-700" },
+  workload: { bg: "bg-orange-50", border: "border-orange-200", badge: "bg-orange-100 text-orange-700" },
+  planning: { bg: "bg-indigo-50", border: "border-indigo-200", badge: "bg-indigo-100 text-indigo-700" },
+  prioritization: { bg: "bg-amber-50", border: "border-amber-200", badge: "bg-amber-100 text-amber-700" },
+  ownership: { bg: "bg-red-50", border: "border-red-200", badge: "bg-red-100 text-red-700" },
+  quality: { bg: "bg-pink-50", border: "border-pink-200", badge: "bg-pink-100 text-pink-700" },
+  positive: { bg: "bg-green-50", border: "border-green-200", badge: "bg-green-100 text-green-700" },
+  improvement: { bg: "bg-teal-50", border: "border-teal-200", badge: "bg-teal-100 text-teal-700" },
+};
+
+function SprintInsightsPanel({ analyticsData }) {
+  if (!analyticsData) return null;
+
+  const retroPrompts = analyticsData.retroPrompts || [];
+  const health = analyticsData.sprintHealth;
+  const bottlenecks = analyticsData.bottlenecks || [];
+  const wipViolations = analyticsData.wipLimits?.violations || [];
+
+  // Workload from analytics backend (already computed per-person)
+  const workload = analyticsData.teamWorkload || [];
+
+  const maxWorkload = Math.max(...workload.map((w) => w.total), 1);
+
+  const healthColor = health?.score >= 75 ? "text-green-600" : health?.score >= 50 ? "text-amber-600" : "text-red-600";
+  const healthBg = health?.score >= 75 ? "bg-green-50" : health?.score >= 50 ? "bg-amber-50" : "bg-red-50";
+
+  return (
+    <div className="space-y-4">
+      {/* Sprint Metrics Row */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <h3 className="text-sm font-semibold text-gray-800 mb-4">Sprint Metrics</h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+          {health && (
+            <div className={`rounded-lg p-3 text-center ${healthBg}`}>
+              <div className={`text-xl font-bold ${healthColor}`}>{health.score}/100</div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider">Sprint Health</div>
+            </div>
+          )}
+          <div className="rounded-lg p-3 text-center bg-gray-50">
+            <div className="text-xl font-bold text-gray-700">{analyticsData.total}</div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">Total Tickets</div>
+          </div>
+          <div className="rounded-lg p-3 text-center bg-blue-50">
+            <div className="text-xl font-bold text-blue-700">{analyticsData.wipCount}</div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">WIP</div>
+          </div>
+          <div className="rounded-lg p-3 text-center bg-gray-50">
+            <div className="text-xl font-bold text-gray-700">{analyticsData.cycleTime?.avg || "—"}d</div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">Avg Cycle Time</div>
+          </div>
+          <div className="rounded-lg p-3 text-center bg-gray-50">
+            <div className={`text-xl font-bold ${analyticsData.avgQuality >= 60 ? "text-green-700" : analyticsData.avgQuality >= 40 ? "text-amber-700" : "text-red-700"}`}>
+              {analyticsData.avgQuality}%
+            </div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">Avg Quality</div>
+          </div>
+          <div className="rounded-lg p-3 text-center bg-gray-50">
+            <div className={`text-xl font-bold ${analyticsData.priorityInflation > 30 ? "text-amber-700" : "text-gray-700"}`}>
+              {analyticsData.priorityInflation}%
+            </div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">Priority Inflation</div>
+          </div>
+        </div>
+
+        {/* Bottlenecks */}
+        {bottlenecks.length > 0 && (
+          <div className="mt-4">
+            <p className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">Bottlenecks</p>
+            <div className="flex flex-wrap gap-2">
+              {bottlenecks.map((b, i) => (
+                <span key={i} className="text-xs bg-red-50 text-red-700 px-2.5 py-1 rounded-lg border border-red-200">
+                  {b.status}: {b.count} items ({b.ratio}x avg)
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* WIP Violations */}
+        {wipViolations.length > 0 && (
+          <div className="mt-3">
+            <p className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mb-2">WIP Limit Violations</p>
+            <div className="flex flex-wrap gap-2">
+              {wipViolations.map((v, i) => (
+                <span key={i} className="text-xs bg-orange-50 text-orange-700 px-2.5 py-1 rounded-lg border border-orange-200">
+                  {v.name}: {v.current}/{v.limit}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Workload Distribution */}
+      {workload.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h3 className="text-sm font-semibold text-gray-800 mb-4">Workload Distribution</h3>
+          <div className="space-y-2">
+            {workload.map((w) => (
+              <div key={w.name} className="flex items-center gap-3">
+                <span className="text-xs text-gray-600 w-28 shrink-0 truncate" title={w.name}>{w.name}</span>
+                <div className="flex-1 h-5 bg-gray-100 rounded-full overflow-hidden flex">
+                  <div
+                    className="h-full bg-green-400 transition-all"
+                    style={{ width: `${(w.done / maxWorkload) * 100}%` }}
+                    title={`Done: ${w.done}`}
+                  />
+                  <div
+                    className="h-full bg-blue-400 transition-all"
+                    style={{ width: `${(w.inProgress / maxWorkload) * 100}%` }}
+                    title={`In Progress: ${w.inProgress}`}
+                  />
+                  <div
+                    className="h-full bg-gray-300 transition-all"
+                    style={{ width: `${((w.todo || (w.total - w.done - w.inProgress)) / maxWorkload) * 100}%` }}
+                    title={`To Do: ${w.todo || (w.total - w.done - w.inProgress)}`}
+                  />
+                </div>
+                <span className="text-xs text-gray-500 w-8 text-right shrink-0">{w.total}</span>
+                {w.overdue > 0 && (
+                  <span className="text-[10px] text-red-600 font-medium">{w.overdue} overdue</span>
+                )}
+              </div>
+            ))}
+            <div className="flex items-center gap-4 mt-2 pt-2 border-t border-gray-100">
+              <span className="flex items-center gap-1 text-[10px] text-gray-500"><span className="w-2.5 h-2.5 rounded-full bg-green-400 inline-block" /> Done</span>
+              <span className="flex items-center gap-1 text-[10px] text-gray-500"><span className="w-2.5 h-2.5 rounded-full bg-blue-400 inline-block" /> In Progress</span>
+              <span className="flex items-center gap-1 text-[10px] text-gray-500"><span className="w-2.5 h-2.5 rounded-full bg-gray-300 inline-block" /> To Do</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Auto-Generated Discussion Prompts */}
+      {retroPrompts.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="flex items-center justify-between mb-1">
+            <h3 className="text-sm font-semibold text-gray-800">Discussion Prompts</h3>
+            <span className="text-[10px] text-gray-400">Auto-generated from board patterns</span>
+          </div>
+          <p className="text-xs text-gray-500 mb-4">
+            Data-driven questions to guide your retrospective — based on actual ticket patterns detected in your board.
+          </p>
+          <div className="space-y-2.5">
+            {retroPrompts.map((prompt, i) => {
+              const colors = PROMPT_CAT_COLORS[prompt.category] || PROMPT_CAT_COLORS.process;
+              return (
+                <div key={i} className={`${colors.bg} border ${colors.border} rounded-xl p-4`}>
+                  <div className="flex items-start gap-3">
+                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded ${colors.badge} uppercase shrink-0 mt-0.5`}>
+                      {prompt.category}
+                    </span>
+                    <div className="flex-1">
+                      <p className="text-sm text-gray-800 font-medium leading-relaxed">{prompt.question}</p>
+                      {prompt.context && (
+                        <p className="text-xs text-gray-500 mt-1.5">{prompt.context}</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, color, bg = "bg-gray-50", alert = false }) {
+  return (
+    <div className={`rounded-lg p-3 text-center ${bg} ${alert ? "ring-1 ring-red-200" : ""}`}>
+      <div className={`text-xl font-bold ${color}`}>{value}</div>
+      <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
+    </div>
+  );
 }
 
 export default function RetroPage() {
@@ -132,6 +571,12 @@ export default function RetroPage() {
   const [report, setReport] = useState(null);
   const [showCoachTips, setShowCoachTips] = useState(true);
   const [pollInterval, setPollInterval] = useState(null);
+
+  // Ticket analysis state
+  const [jql, setJql] = useState(DEFAULT_JQL);
+  const [inputJql, setInputJql] = useState(DEFAULT_JQL);
+  const [ticketData, setTicketData] = useState(null);
+  const [ticketLoading, setTicketLoading] = useState(false);
 
   // Load author from localStorage
   useEffect(() => {
@@ -155,10 +600,26 @@ export default function RetroPage() {
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
-  // Load analytics for prompt building
+  // Load analytics and ticket data for prompt building
   useEffect(() => {
-    fetchAnalytics(DEFAULT_JQL).then(setAnalyticsData).catch(() => {});
+    fetchAnalytics(jql).then(setAnalyticsData).catch(() => {});
+  }, [jql]);
+
+  // Load ticket data when JQL changes
+  const loadTickets = useCallback(async (query) => {
+    setTicketLoading(true);
+    try {
+      const result = await fetchIssues(query);
+      setTicketData(result);
+    } catch (err) {
+      console.error("Failed to load ticket data:", err);
+    }
+    setTicketLoading(false);
   }, []);
+
+  useEffect(() => {
+    loadTickets(jql);
+  }, [jql, loadTickets]);
 
   // Auto-refresh current session every 5 seconds (collaborative)
   useEffect(() => {
@@ -257,8 +718,8 @@ export default function RetroPage() {
 
   const prompt = useMemo(() => {
     if (!currentSession) return "";
-    return buildRetroPrompt(analyticsData, currentSession.entries || [], {});
-  }, [analyticsData, currentSession]);
+    return buildRetroPrompt(analyticsData, currentSession.entries || [], ticketData, {});
+  }, [analyticsData, currentSession, ticketData]);
 
   const entriesByCategory = useMemo(() => {
     if (!currentSession?.entries) return {};
@@ -277,7 +738,23 @@ export default function RetroPage() {
         <div className="max-w-[1400px] mx-auto px-4 py-3">
           <div className="flex items-center justify-between mb-3">
             <h1 className="text-lg font-bold text-gray-900">Retrospective</h1>
+            <div className="flex items-center gap-2">
+              {ticketData && (
+                <span className="text-xs text-gray-400">{ticketData.total} tickets loaded</span>
+              )}
+              {ticketLoading && (
+                <span className="text-xs text-blue-500">Loading tickets...</span>
+              )}
+            </div>
           </div>
+
+          {/* JQL Bar for ticket selection */}
+          <JqlBar
+            value={inputJql}
+            onChange={setInputJql}
+            onSubmit={(q) => setJql(q)}
+            placeholder="Select sprint/tickets for retrospective analysis..."
+          />
 
           {/* Breadcrumb navigation */}
           <div className="flex items-center gap-2 text-sm">
@@ -331,6 +808,120 @@ export default function RetroPage() {
           </div>
         )}
 
+        {/* AI Coach — ticket-data-driven insights */}
+        {currentSession && (
+          <div className="mb-4">
+            <AiCoachPanel
+              context="Sprint Retrospective"
+              data={{
+                entries: currentSession.entries?.map(e => ({ category: e.category, text: e.text, votes: e.votes })),
+                entryCount: currentSession.entries?.length,
+                ticketSummary: ticketData ? buildTicketSummaryForCoach(ticketData) : null,
+                analytics: analyticsData ? {
+                  total: analyticsData.total,
+                  wipCount: analyticsData.wipCount,
+                  avgQuality: analyticsData.avgQuality,
+                  cycleTime: analyticsData.cycleTime,
+                  staleCount: analyticsData.staleIssues?.length || 0,
+                  staleTickets: analyticsData.staleIssues?.slice(0, 10).map((i) => ({ key: i.key, summary: i.summary, daysSinceUpdate: i.daysSinceUpdate })),
+                  overdueCount: analyticsData.dueDateCompliance?.overdueActive || 0,
+                  priorityInflation: analyticsData.priorityInflation,
+                  sprintHealth: analyticsData.sprintHealth,
+                  bottlenecks: analyticsData.bottlenecks,
+                  wipViolations: analyticsData.wipLimits?.violations,
+                  retroPrompts: analyticsData.retroPrompts,
+                } : null,
+              }}
+              prompts={[
+                {
+                  label: "Full Retro Analysis",
+                  primary: true,
+                  question: `As a senior Agile Coach, analyze this sprint's ticket data AND team feedback together. For each area below, reference SPECIFIC ticket keys and assignees:
+
+1. **What Went Well**: Identify completed work, good practices, and wins — cite the tickets that demonstrate this
+2. **What Went Wrong**: Overdue items, stale tickets, blockers, scope creep — cite specific tickets
+3. **Root Causes**: For each problem, analyze WHY it happened (process? planning? communication? technical?)
+4. **Coaching Questions**: Suggest 5 powerful questions to ask the team that will drive deeper reflection (based on the specific patterns you see in the data)
+5. **Improvement Plan**: 3 concrete improvements ranked by impact, with measurable success criteria
+6. **Team Dynamics**: Observations on workload balance, communication patterns, and collaboration
+7. **Next Sprint Recommendations**: What should change immediately based on this retro`,
+                },
+                {
+                  label: "What went well vs wrong",
+                  question: "Analyze the ticket data to identify what went well (completed on time, good velocity, unblocked quickly) vs what went wrong (overdue, stale, blocked, unassigned). For each, cite the specific ticket keys as evidence.",
+                },
+                {
+                  label: "Coaching questions",
+                  question: `Based on the ticket data patterns (overdue items, stale tickets, workload distribution, blockers), suggest 8-10 powerful retrospective coaching questions. These should be:
+- Evidence-based (reference specific patterns from the data)
+- Open-ended (start with "What...", "How...", "Why...")
+- Action-oriented (lead toward concrete improvements)
+- Non-blaming (focus on process, not people)
+Examples: "What caused [TICKET-KEY] to become stale for 14 days — was it a dependency, unclear requirements, or competing priorities?"`,
+                },
+                {
+                  label: "Improvement suggestions",
+                  question: "Based on the sprint data, suggest 5 specific process improvements. For each, explain: what problem it solves (cite ticket keys), how to implement it, what metric will prove it worked, and the estimated effort (low/medium/high).",
+                },
+                {
+                  label: "Team workload analysis",
+                  question: "Analyze the workload distribution across team members. Who is overloaded? Who has capacity? Are there bottlenecks in specific people? Suggest rebalancing strategies for next sprint.",
+                },
+                {
+                  label: "Pattern analysis",
+                  question: "Look at the ticket data for recurring anti-patterns: Do we consistently miss deadlines? Are certain types of work always blocked? Do specific team members always end up with stale tickets? Identify 3-5 systemic patterns and suggest how to break each cycle.",
+                },
+              ]}
+            />
+          </div>
+        )}
+
+        {/* AI Coach — available even without session, for ticket-only analysis */}
+        {!currentSession && ticketData && ticketData.total > 0 && (
+          <div className="mb-4">
+            <AiCoachPanel
+              context="Retrospective Ticket Analysis"
+              data={{
+                ticketSummary: buildTicketSummaryForCoach(ticketData),
+                analytics: analyticsData ? {
+                  total: analyticsData.total,
+                  wipCount: analyticsData.wipCount,
+                  avgQuality: analyticsData.avgQuality,
+                  cycleTime: analyticsData.cycleTime,
+                  staleCount: analyticsData.staleIssues?.length || 0,
+                  staleTickets: analyticsData.staleIssues?.slice(0, 10).map((i) => ({ key: i.key, summary: i.summary, daysSinceUpdate: i.daysSinceUpdate })),
+                  overdueCount: analyticsData.dueDateCompliance?.overdueActive || 0,
+                  priorityInflation: analyticsData.priorityInflation,
+                  sprintHealth: analyticsData.sprintHealth,
+                  bottlenecks: analyticsData.bottlenecks,
+                  wipViolations: analyticsData.wipLimits?.violations,
+                  retroPrompts: analyticsData.retroPrompts,
+                } : null,
+              }}
+              prompts={[
+                {
+                  label: "Pre-Retro Analysis",
+                  primary: true,
+                  question: `Analyze the ticket data to prepare for a retrospective. Identify:
+1. Key wins and completed work worth celebrating
+2. Problems: overdue, stale, blocked, or unassigned items (cite ticket keys)
+3. Root cause hypotheses for each problem
+4. 8 coaching questions to drive the retro discussion
+5. Suggested retro agenda based on the data patterns`,
+                },
+                {
+                  label: "Retro discussion topics",
+                  question: "Based on the ticket data, suggest the top 5 discussion topics for our retrospective, ordered by impact. For each, provide the evidence from tickets and a coaching question to start the conversation.",
+                },
+                {
+                  label: "Sprint health assessment",
+                  question: "Give a health assessment of this sprint based purely on the ticket data. Score it 0-100 and explain the key factors. What's the single biggest risk going into next sprint?",
+                },
+              ]}
+            />
+          </div>
+        )}
+
         {/* ═══ AGILE COACH TIPS ═══ */}
         {showCoachTips && (
           <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-5">
@@ -353,6 +944,16 @@ export default function RetroPage() {
           <button onClick={() => setShowCoachTips(true)} className="text-xs text-indigo-500 hover:text-indigo-700">
             Show Agile Coach Tips
           </button>
+        )}
+
+        {/* ═══ TICKET ANALYSIS PANEL ═══ */}
+        {ticketData && !ticketLoading && (
+          <TicketAnalysisPanel ticketData={ticketData} jiraBaseUrl={JIRA_BASE_URL} />
+        )}
+
+        {/* ═══ SPRINT INSIGHTS (metrics + workload + discussion prompts) ═══ */}
+        {analyticsData && !ticketLoading && (
+          <SprintInsightsPanel analyticsData={analyticsData} />
         )}
 
         {/* ═══ SESSIONS LIST ═══ */}
@@ -593,10 +1194,52 @@ export default function RetroPage() {
               )}
             </div>
 
+            {/* What Went Well */}
+            {report.what_went_well?.length > 0 && (
+              <div className="bg-green-50 border border-green-200 rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-green-800 mb-3">What Went Well</h3>
+                <div className="space-y-3">
+                  {report.what_went_well.map((item, i) => (
+                    <div key={i} className="bg-white/60 rounded-lg p-3">
+                      <h4 className="text-sm font-medium text-green-800">{item.title}</h4>
+                      <p className="text-xs text-green-700 mt-1"><strong>Evidence:</strong> {item.evidence}</p>
+                      {item.team_alignment && (
+                        <p className="text-xs text-green-600 mt-1"><strong>Team says:</strong> {item.team_alignment}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* What Went Wrong */}
+            {report.what_went_wrong?.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-red-800 mb-3">What Went Wrong</h3>
+                <div className="space-y-3">
+                  {report.what_went_wrong.map((item, i) => {
+                    const impactColor = item.impact === "high" ? "bg-red-200 text-red-800"
+                      : item.impact === "medium" ? "bg-amber-200 text-amber-800"
+                      : "bg-gray-200 text-gray-700";
+                    return (
+                      <div key={i} className="bg-white/60 rounded-lg p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <h4 className="text-sm font-medium text-red-800">{item.title}</h4>
+                          <span className={`text-[10px] font-medium px-2 py-0.5 rounded ${impactColor}`}>{item.impact}</span>
+                        </div>
+                        <p className="text-xs text-red-700"><strong>Evidence:</strong> {item.evidence}</p>
+                        <p className="text-xs text-red-600 mt-1"><strong>Root cause:</strong> {item.root_cause}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Celebrations */}
             {report.celebrations?.length > 0 && (
               <div className="bg-green-50 border border-green-200 rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-green-800 mb-3">{"\uD83C\uDF89"} Celebrations</h3>
+                <h3 className="text-sm font-semibold text-green-800 mb-3">Celebrations</h3>
                 <div className="space-y-2">
                   {report.celebrations.map((c, i) => (
                     <p key={i} className="text-sm text-green-700">{c}</p>
@@ -605,13 +1248,40 @@ export default function RetroPage() {
               </div>
             )}
 
+            {/* Coaching Questions */}
+            {report.coaching_questions?.length > 0 && (
+              <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-indigo-800 mb-3">Coaching Questions for the Team</h3>
+                <div className="space-y-2">
+                  {report.coaching_questions.map((q, i) => (
+                    <div key={i} className="flex items-start gap-2">
+                      <span className="text-indigo-400 text-sm mt-0.5 shrink-0">{i + 1}.</span>
+                      <p className="text-sm text-indigo-700 italic">{q}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Warning Signs (Coach) */}
             {report.warning_signs?.length > 0 && (
               <div className="bg-red-50 border border-red-200 rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-red-800 mb-3">{"\u26A0\uFE0F"} Agile Coach Warning Signs</h3>
+                <h3 className="text-sm font-semibold text-red-800 mb-3">Agile Coach Warning Signs</h3>
                 <div className="space-y-2">
                   {report.warning_signs.map((w, i) => (
                     <p key={i} className="text-sm text-red-700">{w}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Team Dynamics */}
+            {report.team_dynamics_observations?.length > 0 && (
+              <div className="bg-purple-50 border border-purple-200 rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-purple-800 mb-3">Team Dynamics Observations</h3>
+                <div className="space-y-2">
+                  {report.team_dynamics_observations.map((obs, i) => (
+                    <p key={i} className="text-sm text-purple-700">{obs}</p>
                   ))}
                 </div>
               </div>
@@ -680,6 +1350,36 @@ export default function RetroPage() {
               </div>
             )}
 
+            {/* Improvement Suggestions */}
+            {report.improvement_suggestions?.length > 0 && (
+              <div>
+                <h3 className="text-sm font-semibold text-gray-800 mb-3">Improvement Suggestions</h3>
+                <div className="space-y-2">
+                  {report.improvement_suggestions.map((item, i) => {
+                    const effortColor = item.effort === "low" ? "bg-green-100 text-green-700"
+                      : item.effort === "medium" ? "bg-amber-100 text-amber-700"
+                      : "bg-red-100 text-red-700";
+                    return (
+                      <div key={i} className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-xs font-bold text-indigo-700 bg-indigo-200 rounded-full w-6 h-6 flex items-center justify-center">
+                            {item.priority || i + 1}
+                          </span>
+                          <h4 className="text-sm font-semibold text-indigo-900">{item.title}</h4>
+                          <span className={`text-[10px] font-medium px-2 py-0.5 rounded ${effortColor}`}>{item.effort} effort</span>
+                        </div>
+                        <p className="text-sm text-indigo-800">{item.description}</p>
+                        <div className="flex flex-wrap gap-4 mt-2 text-xs text-indigo-600">
+                          <span><strong>Addresses:</strong> {item.addresses}</span>
+                          <span><strong>Measure:</strong> {item.measurable_outcome}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Next Sprint Focus */}
             {report.next_sprint_focus && (
               <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-5 text-center">
@@ -689,6 +1389,7 @@ export default function RetroPage() {
             )}
           </div>
         )}
+
       </main>
     </div>
   );

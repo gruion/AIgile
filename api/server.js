@@ -113,6 +113,11 @@ function getServer(serverId) {
   return JIRA_SERVERS.find((s) => s.id === serverId) || JIRA_SERVERS[0];
 }
 
+// Helper: strip ORDER BY clause from user-provided JQL before AND-ing
+function stripOrderBy(jql) {
+  return jql ? jql.replace(/\s+ORDER\s+BY\s+.*/i, "").trim() : jql;
+}
+
 // Helper: get browser-accessible URL for a server (for clickable links)
 // JIRA_BASE_URL inside Docker is the internal hostname (http://jira:8080).
 // JIRA_BROWSER_URL should be set to the external URL reachable from the browser.
@@ -150,13 +155,14 @@ async function jiraFetchAgileFrom(server, path) {
   return res.json();
 }
 
-async function jiraSearchAllFrom(server, jql, fieldsStr, pageSize = 100) {
+async function jiraSearchAllFrom(server, jql, fieldsStr, pageSize = 100, expand = "") {
   let startAt = 0;
   let allIssues = [];
   let total = 0;
   do {
+    const expandParam = expand ? `&expand=${expand}` : "";
     const data = await jiraFetchFrom(server,
-      `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}`
+      `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}${expandParam}`
     );
     total = data.total;
     allIssues = allIssues.concat(data.issues);
@@ -272,14 +278,15 @@ async function jiraFetchAgile(path) {
 }
 
 // Paginated search — fetches ALL matching issues, not just one page
-async function jiraSearchAll(jql, fieldsStr, pageSize = 100) {
+async function jiraSearchAll(jql, fieldsStr, pageSize = 100, expand = "") {
   let startAt = 0;
   let allIssues = [];
   let total = 0;
 
   do {
+    const expandParam = expand ? `&expand=${expand}` : "";
     const data = await jiraFetch(
-      `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}`
+      `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}${expandParam}`
     );
     total = data.total;
     allIssues = allIssues.concat(data.issues);
@@ -502,13 +509,29 @@ app.get("/issues", async (req, res) => {
     const jql = req.query.jql || (req.query.project ? `project = ${req.query.project} ORDER BY status ASC, updated DESC` : DEFAULT_JQL);
 
     const epicFields = EPIC_LINK_FIELDS.join(",");
-    const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged`;
+    const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged,issuelinks`;
 
     // Paginate to get ALL issues
     const data = await jiraSearchAll(jql, fieldsStr);
 
     const issues = data.issues.map((issue) => {
       const lastComment = issue.fields.comment?.comments?.slice(-1)[0];
+
+      const links = (issue.fields.issuelinks || []).map((link) => {
+        const target = link.outwardIssue || link.inwardIssue;
+        return {
+          type: link.type?.name,
+          direction: link.outwardIssue ? link.type?.outward : link.type?.inward,
+          key: target?.key,
+          summary: target?.fields?.summary,
+          status: target?.fields?.status?.name,
+          statusCategory: target?.fields?.status?.statusCategory?.key,
+          priority: target?.fields?.priority?.name,
+          issueType: target?.fields?.issuetype?.name,
+          project: target?.key?.split("-")[0],
+        };
+      });
+
       const mapped = {
         key: issue.key,
         summary: issue.fields.summary,
@@ -528,6 +551,7 @@ app.get("/issues", async (req, res) => {
         originalEstimate: issue.fields.timetracking?.originalEstimate || null,
         remainingEstimate: issue.fields.timetracking?.remainingEstimate || null,
         timeSpent: issue.fields.timetracking?.timeSpent || null,
+        links,
         lastComment: lastComment
           ? {
               author: lastComment.author?.displayName,
@@ -715,6 +739,104 @@ app.get("/epic/:key", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching epic detail:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Single Issue Detail (for story-level AI prompt) ──────
+app.get("/issue/:key", async (req, res) => {
+  try {
+    const issueKey = req.params.key;
+    const epicFieldsList = EPIC_LINK_FIELDS.join(",");
+    const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,issuelinks,timetracking,${epicFieldsList},parent`;
+
+    const raw = await jiraFetch(`/issue/${issueKey}?fields=${fieldsStr}&expand=changelog`);
+    const f = raw.fields;
+
+    const comments = (f.comment?.comments || []).map((c) => ({
+      author: c.author?.displayName || "Unknown",
+      body: (c.body || "").substring(0, 500),
+      date: c.updated || c.created,
+    }));
+
+    const links = (f.issuelinks || []).map((link) => {
+      const target = link.outwardIssue || link.inwardIssue;
+      return {
+        type: link.type?.name,
+        direction: link.outwardIssue ? link.type?.outward : link.type?.inward,
+        key: target?.key,
+        summary: target?.fields?.summary,
+        status: target?.fields?.status?.name,
+      };
+    });
+
+    const blockers = links.filter(
+      (l) =>
+        l.direction?.toLowerCase().includes("blocked by") ||
+        l.direction?.toLowerCase().includes("is blocked")
+    );
+
+    // Extract changelog
+    const changelog = [];
+    for (const history of (raw.changelog?.histories || [])) {
+      for (const item of history.items || []) {
+        changelog.push({
+          field: item.field,
+          from: item.fromString,
+          to: item.toString,
+          author: history.author?.displayName || "Unknown",
+          date: history.created,
+        });
+      }
+    }
+
+    // Epic/parent info
+    const parentKey = f.parent?.key || null;
+    const parentSummary = f.parent?.fields?.summary || null;
+
+    // Subtasks
+    let subtasks = [];
+    if (f.subtasks?.length) {
+      subtasks = f.subtasks.map(s => ({
+        key: s.key,
+        summary: s.fields?.summary,
+        status: s.fields?.status?.name,
+        statusCategory: s.fields?.status?.statusCategory?.key,
+      }));
+    }
+
+    const issue = {
+      key: raw.key,
+      summary: f.summary,
+      description: f.description || "",
+      status: f.status?.name,
+      statusCategory: f.status?.statusCategory?.key,
+      assigneeName: f.assignee?.displayName || null,
+      priority: f.priority?.name,
+      issueType: f.issuetype?.name,
+      labels: f.labels || [],
+      created: f.created,
+      updated: f.updated,
+      dueDate: f.duedate || null,
+      originalEstimate: f.timetracking?.originalEstimate || null,
+      remainingEstimate: f.timetracking?.remainingEstimate || null,
+      timeSpent: f.timetracking?.timeSpent || null,
+      comments,
+      commentCount: f.comment?.total || 0,
+      links,
+      blockers,
+      changelog,
+      parentKey,
+      parentSummary,
+      subtasks,
+      daysSinceUpdate: daysSince(f.updated),
+    };
+
+    issue.urgencyFlags = computeUrgency(issue);
+
+    res.json({ issue });
+  } catch (err) {
+    console.error("Error fetching issue detail:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1210,14 +1332,8 @@ app.get("/analytics", async (req, res) => {
 
 // ─── AI endpoints (called by n8n) ───────────────────────
 
-let aiProvider = null;
-async function getProvider() {
-  if (!aiProvider) {
-    const { getAIProvider } = await import("../ai-lib/index.js");
-    aiProvider = getAIProvider();
-  }
-  return aiProvider;
-}
+// AI endpoints return prompts only — no external LLM provider connections.
+// Users copy the prompt into their own AI chatbot and paste back the response.
 
 app.post("/ai/summarize-ticket", async (req, res) => {
   try {
@@ -1225,11 +1341,11 @@ app.post("/ai/summarize-ticket", async (req, res) => {
     if (!ticketData || !ticketData.key) {
       return res.status(400).json({ error: "Missing ticket data (need at least 'key')" });
     }
-    const provider = await getProvider();
-    const summary = await provider.summarizeTicket(ticketData);
-    res.json({ issue_key: ticketData.key, ...summary });
+    const { buildTicketPrompt } = await import("../ai-lib/prompts.js");
+    const prompt = buildTicketPrompt(ticketData);
+    res.json({ issue_key: ticketData.key, prompt });
   } catch (err) {
-    console.error("Error summarizing ticket:", err.message);
+    console.error("Error building ticket prompt:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1240,11 +1356,11 @@ app.post("/ai/summarize-board", async (req, res) => {
     if (!tickets || !Array.isArray(tickets)) {
       return res.status(400).json({ error: "Missing 'tickets' array in body" });
     }
-    const provider = await getProvider();
-    const summary = await provider.summarizeBoard(tickets);
-    res.json({ jql: jql || "unknown", total_issues: tickets.length, ...summary });
+    const { buildBoardPrompt } = await import("../ai-lib/prompts.js");
+    const prompt = buildBoardPrompt(tickets);
+    res.json({ jql: jql || "unknown", total_issues: tickets.length, prompt });
   } catch (err) {
-    console.error("Error summarizing board:", err.message);
+    console.error("Error building board prompt:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2346,7 +2462,9 @@ app.get("/compliance/projects", async (req, res) => {
 
     const results = await Promise.all(TEAMS.map(async (team) => {
       const server = getServer(team.serverId);
-      const jql = team.jql || `project = ${team.projectKey} ORDER BY status ASC, updated DESC`;
+      const userJql = req.query.jql;
+      let baseJql = team.jql || `project = ${team.projectKey}`;
+      const jql = userJql ? `(${baseJql}) AND (${stripOrderBy(userJql)}) ORDER BY status ASC, updated DESC` : `${baseJql} ORDER BY status ASC, updated DESC`;
       let issues = [];
       try {
         const data = await jiraSearchAllFrom(server, jql, FIELDS);
@@ -2911,7 +3029,9 @@ app.get("/compliance/pi", async (req, res) => {
 
     await Promise.all(TEAMS.map(async (team) => {
       const server = getServer(team.serverId);
-      const jql = team.jql || `project = ${team.projectKey} ORDER BY status ASC, updated DESC`;
+      const userJql = req.query.jql;
+      let baseJql = team.jql || `project = ${team.projectKey}`;
+      const jql = userJql ? `(${baseJql}) AND (${stripOrderBy(userJql)}) ORDER BY status ASC, updated DESC` : `${baseJql} ORDER BY status ASC, updated DESC`;
       try {
         const data = await jiraSearchAllFrom(server, jql, FIELDS);
         teamDataMap[team.id] = { team, server, issues: data.issues };
@@ -3279,6 +3399,1078 @@ app.get("/compliance/pi", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in compliance/pi:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Sprint & Velocity Endpoints ─────────────────────────
+
+// Get sprints for a board
+app.get("/sprints", async (req, res) => {
+  try {
+    const team = TEAMS[0];
+    const server = getServer(team?.serverId);
+    let boardId = team?.boardId;
+
+    // Auto-detect board if not configured
+    if (!boardId) {
+      const boards = await jiraFetchAgileFrom(server, `/board?projectKeyOrId=${team?.projectKey || JIRA_PROJECT_KEY}&maxResults=1`);
+      boardId = boards.values?.[0]?.id;
+      if (!boardId) return res.json({ sprints: [], message: "No board found" });
+    }
+
+    const data = await jiraFetchAgileFrom(server, `/board/${boardId}/sprint?state=active,closed&maxResults=20`);
+    const sprints = (data.values || []).map(s => ({
+      id: s.id, name: s.name, state: s.state,
+      startDate: s.startDate, endDate: s.endDate, completeDate: s.completeDate,
+      goal: s.goal || "",
+    })).sort((a, b) => new Date(b.startDate || 0) - new Date(a.startDate || 0));
+
+    res.json({ sprints, boardId });
+  } catch (err) {
+    console.error("Error fetching sprints:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Burndown data for a sprint
+app.get("/sprints/:id/burndown", async (req, res) => {
+  try {
+    const sprintId = req.params.id;
+    const team = TEAMS[0];
+    const server = getServer(team?.serverId);
+
+    // Get sprint info
+    const sprint = await jiraFetchAgileFrom(server, `/sprint/${sprintId}`);
+    if (!sprint.startDate || !sprint.endDate) {
+      return res.json({ sprint, daily: [], issues: [] });
+    }
+
+    // Get issues in sprint
+    const userJql = req.query.jql;
+    const jql = userJql ? `sprint = ${sprintId} AND (${stripOrderBy(userJql)}) ORDER BY created ASC` : `sprint = ${sprintId} ORDER BY created ASC`;
+    const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate,timetracking," + EPIC_LINK_FIELDS.join(",") + ",parent,labels";
+    const data = await jiraSearchAll(jql, fieldsStr);
+
+    const startDate = new Date(sprint.startDate);
+    const endDate = new Date(sprint.endDate || sprint.completeDate || new Date());
+    const totalDays = Math.ceil((endDate - startDate) / 86400000);
+
+    // Build daily burndown
+    const daily = [];
+    const totalIssues = data.issues.length;
+    let totalPoints = 0;
+    const issueDetails = data.issues.map(i => {
+      const sp = i.fields.timetracking?.originalEstimateSeconds
+        ? Math.round(i.fields.timetracking.originalEstimateSeconds / 3600)
+        : (i.fields[EPIC_LINK_FIELDS[0]] && typeof i.fields[EPIC_LINK_FIELDS[0]] === "number" ? i.fields[EPIC_LINK_FIELDS[0]] : 1);
+      totalPoints += sp;
+      return {
+        key: i.key, summary: i.fields.summary, points: sp,
+        status: i.fields.status?.name, statusCategory: i.fields.status?.statusCategory?.key,
+        resolvedDate: i.fields.resolutiondate,
+        assignee: i.fields.assignee?.displayName,
+      };
+    });
+
+    for (let d = 0; d <= totalDays; d++) {
+      const date = new Date(startDate.getTime() + d * 86400000);
+      const dateStr = date.toISOString().split("T")[0];
+      const resolvedByDate = issueDetails.filter(i =>
+        i.resolvedDate && new Date(i.resolvedDate).toISOString().split("T")[0] <= dateStr
+      );
+      const resolvedPoints = resolvedByDate.reduce((s, i) => s + i.points, 0);
+      const ideal = Math.round(totalPoints * (1 - d / totalDays) * 10) / 10;
+
+      daily.push({
+        date: dateStr, day: d,
+        remaining: totalPoints - resolvedPoints,
+        completed: resolvedPoints,
+        ideal,
+        scope: totalPoints,
+      });
+    }
+
+    res.json({ sprint, daily, issues: issueDetails, totalPoints, totalIssues });
+  } catch (err) {
+    console.error("Error fetching burndown:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Velocity across sprints
+app.get("/velocity", async (req, res) => {
+  try {
+    const team = TEAMS[0];
+    const server = getServer(team?.serverId);
+    let boardId = team?.boardId;
+
+    if (!boardId) {
+      const boards = await jiraFetchAgileFrom(server, `/board?projectKeyOrId=${team?.projectKey || JIRA_PROJECT_KEY}&maxResults=1`);
+      boardId = boards.values?.[0]?.id;
+      if (!boardId) return res.json({ sprints: [] });
+    }
+
+    const sprintData = await jiraFetchAgileFrom(server, `/board/${boardId}/sprint?state=closed,active&maxResults=15`);
+    const sprints = (sprintData.values || []).sort((a, b) => new Date(a.startDate || 0) - new Date(b.startDate || 0));
+    const userJql = req.query.jql;
+
+    const velocity = [];
+    for (const sprint of sprints.slice(-10)) {
+      const jql = userJql ? `sprint = ${sprint.id} AND (${stripOrderBy(userJql)}) ORDER BY created ASC` : `sprint = ${sprint.id} ORDER BY created ASC`;
+      const fields = "status,issuetype,timetracking," + EPIC_LINK_FIELDS.join(",");
+      const data = await jiraSearchAllFrom(server, jql, fields, 200);
+      let committed = 0, completed = 0, totalIssues = 0, doneIssues = 0;
+      for (const issue of data.issues) {
+        const pts = 1; // count-based; enhance with story points if available
+        committed += pts;
+        totalIssues++;
+        if (issue.fields.status?.statusCategory?.key === "done") {
+          completed += pts;
+          doneIssues++;
+        }
+      }
+      velocity.push({
+        sprintId: sprint.id, sprintName: sprint.name, state: sprint.state,
+        startDate: sprint.startDate, endDate: sprint.endDate,
+        committed, completed, totalIssues, doneIssues,
+        completionRate: totalIssues > 0 ? Math.round((doneIssues / totalIssues) * 100) : 0,
+      });
+    }
+
+    const avgVelocity = velocity.length > 0
+      ? Math.round(velocity.reduce((s, v) => s + v.completed, 0) / velocity.length)
+      : 0;
+
+    res.json({ velocity, avgVelocity });
+  } catch (err) {
+    console.error("Error fetching velocity:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Flow Metrics Endpoints ──────────────────────────────
+
+// Cumulative Flow Diagram data
+app.get("/flow/cfd", async (req, res) => {
+  try {
+    const jql = req.query.jql || DEFAULT_JQL;
+    const days = parseInt(req.query.days) || 30;
+    const fieldsStr = "status,created,updated,resolutiondate";
+    const data = await jiraSearchAll(jql, fieldsStr);
+
+    const now = new Date();
+    const startDate = new Date(now.getTime() - days * 86400000);
+    const dailyData = [];
+
+    for (let d = 0; d <= days; d++) {
+      const date = new Date(startDate.getTime() + d * 86400000);
+      const dateStr = date.toISOString().split("T")[0];
+      let todo = 0, inProgress = 0, done = 0;
+
+      for (const issue of data.issues) {
+        const created = new Date(issue.fields.created);
+        if (created > date) continue; // not yet created
+
+        const resolved = issue.fields.resolutiondate ? new Date(issue.fields.resolutiondate) : null;
+        const statusCat = issue.fields.status?.statusCategory?.key;
+
+        if (resolved && resolved <= date) {
+          done++;
+        } else if (statusCat === "indeterminate" || (statusCat === "done" && (!resolved || resolved > date))) {
+          // Approximate: if currently in-progress or was done after this date
+          inProgress++;
+        } else {
+          todo++;
+        }
+      }
+      dailyData.push({ date: dateStr, todo, inProgress, done, total: todo + inProgress + done });
+    }
+
+    res.json({ daily: dailyData, totalIssues: data.issues.length });
+  } catch (err) {
+    console.error("Error fetching CFD:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cycle time scatterplot data
+app.get("/flow/cycle-time", async (req, res) => {
+  try {
+    const jql = req.query.jql || `project = ${JIRA_PROJECT_KEY} AND statusCategory = Done ORDER BY resolutiondate DESC`;
+    const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate";
+    const data = await jiraSearchAll(jql, fieldsStr, 200);
+
+    const items = data.issues
+      .filter(i => i.fields.resolutiondate && i.fields.created)
+      .map(i => {
+        const created = new Date(i.fields.created);
+        const resolved = new Date(i.fields.resolutiondate);
+        const cycleTimeDays = Math.max(1, Math.round((resolved - created) / 86400000));
+        return {
+          key: i.key, summary: i.fields.summary,
+          issueType: i.fields.issuetype?.name,
+          priority: i.fields.priority?.name,
+          assignee: i.fields.assignee?.displayName,
+          created: i.fields.created,
+          resolved: i.fields.resolutiondate,
+          cycleTimeDays,
+        };
+      })
+      .sort((a, b) => new Date(a.resolved) - new Date(b.resolved));
+
+    // Compute percentiles
+    const times = items.map(i => i.cycleTimeDays).sort((a, b) => a - b);
+    const p50 = times[Math.floor(times.length * 0.5)] || 0;
+    const p85 = times[Math.floor(times.length * 0.85)] || 0;
+    const p95 = times[Math.floor(times.length * 0.95)] || 0;
+    const avg = times.length > 0 ? Math.round(times.reduce((s, t) => s + t, 0) / times.length) : 0;
+
+    res.json({ items, percentiles: { p50, p85, p95, avg }, total: items.length });
+  } catch (err) {
+    console.error("Error fetching cycle time:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Flow metrics (throughput, WIP age, flow efficiency)
+app.get("/flow/metrics", async (req, res) => {
+  try {
+    const jql = req.query.jql || DEFAULT_JQL;
+    const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate";
+    const data = await jiraSearchAll(jql, fieldsStr);
+    const now = Date.now();
+
+    // Throughput: items completed per week over last 8 weeks
+    const weeks = 8;
+    const weeklyThroughput = [];
+    for (let w = weeks - 1; w >= 0; w--) {
+      const weekStart = new Date(now - (w + 1) * 7 * 86400000);
+      const weekEnd = new Date(now - w * 7 * 86400000);
+      const completed = data.issues.filter(i => {
+        const rd = i.fields.resolutiondate ? new Date(i.fields.resolutiondate) : null;
+        return rd && rd >= weekStart && rd < weekEnd;
+      }).length;
+      weeklyThroughput.push({
+        weekStart: weekStart.toISOString().split("T")[0],
+        weekEnd: weekEnd.toISOString().split("T")[0],
+        completed,
+      });
+    }
+
+    // WIP Age: how long current in-progress items have been open
+    const wipItems = data.issues
+      .filter(i => i.fields.status?.statusCategory?.key === "indeterminate")
+      .map(i => ({
+        key: i.key, summary: i.fields.summary,
+        assignee: i.fields.assignee?.displayName,
+        status: i.fields.status?.name,
+        ageDays: Math.floor((now - new Date(i.fields.created).getTime()) / 86400000),
+        lastUpdatedDays: Math.floor((now - new Date(i.fields.updated).getTime()) / 86400000),
+      }))
+      .sort((a, b) => b.ageDays - a.ageDays);
+
+    const avgWipAge = wipItems.length > 0
+      ? Math.round(wipItems.reduce((s, i) => s + i.ageDays, 0) / wipItems.length)
+      : 0;
+
+    // Status distribution
+    const statusDist = { todo: 0, inProgress: 0, done: 0 };
+    for (const i of data.issues) {
+      const cat = i.fields.status?.statusCategory?.key;
+      if (cat === "done") statusDist.done++;
+      else if (cat === "indeterminate") statusDist.inProgress++;
+      else statusDist.todo++;
+    }
+
+    res.json({
+      throughput: weeklyThroughput,
+      avgThroughput: weeklyThroughput.length > 0 ? Math.round(weeklyThroughput.reduce((s, w) => s + w.completed, 0) / weeklyThroughput.length) : 0,
+      wipItems,
+      wipCount: wipItems.length,
+      avgWipAge,
+      statusDistribution: statusDist,
+      totalIssues: data.issues.length,
+    });
+  } catch (err) {
+    console.error("Error fetching flow metrics:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Daily Standup Dashboard ─────────────────────────────
+
+app.get("/standup", async (req, res) => {
+  try {
+    const hours = parseInt(req.query.hours) || 24;
+    const jql = req.query.jql || DEFAULT_JQL;
+    const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate,comment,labels," + EPIC_LINK_FIELDS.join(",") + ",parent";
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "changelog");
+
+    const cutoff = new Date(Date.now() - hours * 3600000);
+    const now = Date.now();
+
+    const recentlyUpdated = [];
+    const newlyCreated = [];
+    const recentlyResolved = [];
+    const blocked = [];
+    const approachingDue = [];
+    const stale = [];
+    const recentComments = []; // track new comments
+
+    for (const issue of data.issues) {
+      const f = issue.fields;
+      const updated = new Date(f.updated);
+      const created = new Date(f.created);
+      const resolved = f.resolutiondate ? new Date(f.resolutiondate) : null;
+      const statusCat = f.status?.statusCategory?.key;
+
+      // Extract recent comments
+      const comments = f.comment?.comments || [];
+      const issueRecentComments = comments
+        .filter(c => new Date(c.created) >= cutoff)
+        .map(c => ({
+          author: c.author?.displayName || "Unknown",
+          body: (c.body || "").substring(0, 300),
+          created: c.created,
+        }));
+
+      // Extract recent changes from changelog
+      const recentChanges = [];
+      const histories = issue.changelog?.histories || [];
+      for (const history of histories) {
+        if (new Date(history.created) < cutoff) continue;
+        for (const item of history.items || []) {
+          const field = item.field?.toLowerCase();
+          // Map field names to readable change types
+          let changeType = null;
+          let detail = null;
+          if (field === "status") {
+            changeType = "status";
+            detail = `${item.fromString || "?"} \u2192 ${item.toString || "?"}`;
+          } else if (field === "assignee") {
+            changeType = "assignee";
+            detail = item.toString ? `\u2192 ${item.toString}` : "Unassigned";
+          } else if (field === "priority") {
+            changeType = "priority";
+            detail = `${item.fromString || "?"} \u2192 ${item.toString || "?"}`;
+          } else if (field === "duedate") {
+            changeType = "duedate";
+            detail = item.toString ? `Set to ${item.toString}` : "Removed";
+          } else if (field === "labels") {
+            changeType = "labels";
+            detail = item.toString || "Changed";
+          } else if (field === "summary") {
+            changeType = "summary";
+            detail = "Title updated";
+          } else if (field === "description") {
+            changeType = "description";
+            detail = "Description updated";
+          } else if (field === "resolution") {
+            changeType = "resolution";
+            detail = item.toString || "Resolved";
+          } else if (field === "sprint") {
+            changeType = "sprint";
+            detail = item.toString || "Changed";
+          } else if (field === "story points" || field === "story_points") {
+            changeType = "points";
+            detail = `${item.fromString || "?"} \u2192 ${item.toString || "?"}`;
+          } else if (field === "link" || field === "issuelinks") {
+            changeType = "link";
+            detail = item.toString || "Link changed";
+          }
+          if (changeType) {
+            recentChanges.push({
+              type: changeType,
+              detail,
+              author: history.author?.displayName || "Unknown",
+              created: history.created,
+            });
+          }
+        }
+      }
+
+      const item = {
+        key: issue.key, summary: f.summary,
+        status: f.status?.name, statusCategory: statusCat,
+        assignee: f.assignee?.displayName,
+        priority: f.priority?.name,
+        issueType: f.issuetype?.name,
+        updated: f.updated, created: f.created,
+        dueDate: f.duedate,
+        labels: f.labels || [],
+        recentComments: issueRecentComments,
+        recentChanges,
+        epicName: f.parent?.fields?.summary || null,
+      };
+
+      // Recently updated (status changed, comments, etc.)
+      if (updated >= cutoff) {
+        recentlyUpdated.push(item);
+      }
+
+      // Newly created
+      if (created >= cutoff) {
+        newlyCreated.push(item);
+      }
+
+      // Recently resolved
+      if (resolved && resolved >= cutoff) {
+        recentlyResolved.push({ ...item, resolvedDate: f.resolutiondate });
+      }
+
+      // Blocked
+      if ((f.labels || []).some(l => l.toLowerCase().includes("block")) && statusCat !== "done") {
+        blocked.push(item);
+      }
+
+      // Approaching due (within 3 days)
+      if (f.duedate && statusCat !== "done") {
+        const daysLeft = Math.floor((new Date(f.duedate).getTime() - now) / 86400000);
+        if (daysLeft >= 0 && daysLeft <= 3) {
+          approachingDue.push({ ...item, daysLeft });
+        }
+      }
+
+      // Stale (no update in 7+ days, not done)
+      if (statusCat !== "done" && statusCat !== "new") {
+        const staleDays = Math.floor((now - updated.getTime()) / 86400000);
+        if (staleDays >= 7) {
+          stale.push({ ...item, staleDays });
+        }
+      }
+
+      // Collect recent comments for the feed
+      for (const c of issueRecentComments) {
+        recentComments.push({
+          issueKey: issue.key,
+          issueSummary: f.summary,
+          assignee: f.assignee?.displayName,
+          status: f.status?.name,
+          ...c,
+        });
+      }
+    }
+
+    // Sort recent comments by date (newest first)
+    recentComments.sort((a, b) => new Date(b.created) - new Date(a.created));
+
+    // Team workload
+    const workload = {};
+    for (const issue of data.issues) {
+      if (issue.fields.status?.statusCategory?.key === "done") continue;
+      const assignee = issue.fields.assignee?.displayName || "Unassigned";
+      if (!workload[assignee]) workload[assignee] = { inProgress: 0, todo: 0, total: 0 };
+      workload[assignee].total++;
+      if (issue.fields.status?.statusCategory?.key === "indeterminate") workload[assignee].inProgress++;
+      else workload[assignee].todo++;
+    }
+
+    res.json({
+      since: cutoff.toISOString(),
+      recentlyUpdated: recentlyUpdated.sort((a, b) => new Date(b.updated) - new Date(a.updated)).slice(0, 40),
+      newlyCreated,
+      recentlyResolved,
+      blocked,
+      approachingDue,
+      stale: stale.sort((a, b) => b.staleDays - a.staleDays).slice(0, 15),
+      recentComments: recentComments.slice(0, 30),
+      workload,
+      summary: {
+        updatedCount: recentlyUpdated.length,
+        createdCount: newlyCreated.length,
+        resolvedCount: recentlyResolved.length,
+        blockedCount: blocked.length,
+        staleCount: stale.length,
+        approachingDueCount: approachingDue.length,
+        recentCommentCount: recentComments.length,
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching standup data:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Sprint Review / Demo Readiness ──────────────────────
+
+app.get("/sprint-review", async (req, res) => {
+  try {
+    const team = TEAMS[0];
+    const server = getServer(team?.serverId);
+    let boardId = team?.boardId;
+
+    if (!boardId) {
+      const boards = await jiraFetchAgileFrom(server, `/board?projectKeyOrId=${team?.projectKey || JIRA_PROJECT_KEY}&maxResults=1`);
+      boardId = boards.values?.[0]?.id;
+      if (!boardId) return res.json({ sprint: null, message: "No board found" });
+    }
+
+    // Get active sprint
+    const sprintData = await jiraFetchAgileFrom(server, `/board/${boardId}/sprint?state=active&maxResults=1`);
+    const activeSprint = sprintData.values?.[0];
+    if (!activeSprint) return res.json({ sprint: null, message: "No active sprint" });
+
+    // Get sprint issues
+    const userJql = req.query.jql;
+    const jql = userJql ? `sprint = ${activeSprint.id} AND (${stripOrderBy(userJql)}) ORDER BY status DESC, priority ASC` : `sprint = ${activeSprint.id} ORDER BY status DESC, priority ASC`;
+    const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate,description,labels," + EPIC_LINK_FIELDS.join(",") + ",parent";
+    const data = await jiraSearchAllFrom(server, jql, fieldsStr, 200);
+
+    const epicGroups = {};
+    const issues = data.issues.map(i => {
+      const f = i.fields;
+      const epicKey = getEpicKey(f) || "__no_epic__";
+      const epicName = f.parent?.fields?.summary || getEpicName(f) || "No Epic";
+      if (!epicGroups[epicKey]) epicGroups[epicKey] = { key: epicKey, name: epicName, issues: [], done: 0, total: 0 };
+      const item = {
+        key: i.key, summary: f.summary,
+        status: f.status?.name, statusCategory: f.status?.statusCategory?.key,
+        assignee: f.assignee?.displayName,
+        priority: f.priority?.name,
+        issueType: f.issuetype?.name,
+        hasDescription: !!(f.description && f.description.length > 30),
+        labels: f.labels || [],
+      };
+      epicGroups[epicKey].issues.push(item);
+      epicGroups[epicKey].total++;
+      if (item.statusCategory === "done") epicGroups[epicKey].done++;
+      return item;
+    });
+
+    const done = issues.filter(i => i.statusCategory === "done").length;
+    const inProgress = issues.filter(i => i.statusCategory === "indeterminate").length;
+    const todo = issues.filter(i => i.statusCategory === "new").length;
+
+    res.json({
+      sprint: {
+        id: activeSprint.id, name: activeSprint.name,
+        goal: activeSprint.goal || "",
+        startDate: activeSprint.startDate, endDate: activeSprint.endDate,
+      },
+      stats: { total: issues.length, done, inProgress, todo, completionRate: issues.length > 0 ? Math.round((done / issues.length) * 100) : 0 },
+      epicGroups: Object.values(epicGroups).sort((a, b) => b.total - a.total),
+      issues,
+    });
+  } catch (err) {
+    console.error("Error fetching sprint review:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Definition of Ready Gate ────────────────────────────
+
+app.get("/dor", async (req, res) => {
+  try {
+    const jql = req.query.jql || `project = ${JIRA_PROJECT_KEY} AND statusCategory != Done ORDER BY priority ASC, created DESC`;
+    const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,duedate,description,labels,timetracking," + EPIC_LINK_FIELDS.join(",") + ",parent";
+    const data = await jiraSearchAll(jql, fieldsStr);
+
+    const items = data.issues.map(i => {
+      const f = i.fields;
+      const checks = [];
+      const desc = f.description || "";
+
+      // Check 1: Has description
+      const hasDesc = desc.length >= 30;
+      checks.push({ id: "description", label: "Description", pass: hasDesc, detail: hasDesc ? "Has description" : "Missing or too short" });
+
+      // Check 2: Has acceptance criteria
+      const hasAC = /acceptance criteria|AC:|given.*when.*then|^\s*[-*]\s*\[/im.test(desc);
+      checks.push({ id: "acceptance_criteria", label: "Acceptance Criteria", pass: hasAC, detail: hasAC ? "Found" : "Not detected in description" });
+
+      // Check 3: Has estimate
+      const hasEstimate = !!(f.timetracking?.originalEstimate);
+      checks.push({ id: "estimate", label: "Estimate", pass: hasEstimate, detail: hasEstimate ? f.timetracking.originalEstimate : "No estimate" });
+
+      // Check 4: Has assignee
+      const hasAssignee = !!f.assignee;
+      checks.push({ id: "assignee", label: "Assignee", pass: hasAssignee, detail: hasAssignee ? f.assignee.displayName : "Unassigned" });
+
+      // Check 5: Has due date
+      const hasDueDate = !!f.duedate;
+      checks.push({ id: "due_date", label: "Due Date", pass: hasDueDate, detail: hasDueDate ? f.duedate : "No due date" });
+
+      // Check 6: Has priority set (not default)
+      const hasPriority = f.priority && f.priority.name !== "Medium";
+      checks.push({ id: "priority", label: "Priority Triaged", pass: hasPriority, detail: f.priority?.name || "None" });
+
+      // Check 7: Has labels/epic
+      const hasContext = (f.labels && f.labels.length > 0) || !!getEpicKey(f);
+      checks.push({ id: "context", label: "Epic/Labels", pass: hasContext, detail: hasContext ? "Has context" : "No epic or labels" });
+
+      const passCount = checks.filter(c => c.pass).length;
+      const readyScore = Math.round((passCount / checks.length) * 100);
+
+      return {
+        key: i.key, summary: f.summary,
+        status: f.status?.name, statusCategory: f.status?.statusCategory?.key,
+        assignee: f.assignee?.displayName,
+        priority: f.priority?.name,
+        issueType: f.issuetype?.name,
+        checks, passCount, totalChecks: checks.length, readyScore,
+        isReady: readyScore >= 70,
+      };
+    });
+
+    const readyCount = items.filter(i => i.isReady).length;
+    const avgScore = items.length > 0 ? Math.round(items.reduce((s, i) => s + i.readyScore, 0) / items.length) : 0;
+
+    // Score distribution
+    const distribution = {
+      ready: items.filter(i => i.readyScore >= 70).length,
+      almostReady: items.filter(i => i.readyScore >= 40 && i.readyScore < 70).length,
+      notReady: items.filter(i => i.readyScore < 40).length,
+    };
+
+    // Most common missing criteria
+    const missingCounts = {};
+    for (const item of items) {
+      for (const check of item.checks) {
+        if (!check.pass) {
+          missingCounts[check.label] = (missingCounts[check.label] || 0) + 1;
+        }
+      }
+    }
+    const topMissing = Object.entries(missingCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, count]) => ({ label, count, pct: Math.round((count / items.length) * 100) }));
+
+    res.json({ items, readyCount, totalCount: items.length, avgScore, distribution, topMissing });
+  } catch (err) {
+    console.error("Error fetching DoR:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROAM Risk Board (in-memory store) ───────────────────
+
+let roamRisks = {};
+
+app.get("/roam/risks", (req, res) => {
+  const risks = Object.values(roamRisks)
+    .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  res.json(risks);
+});
+
+app.post("/roam/risks", (req, res) => {
+  const { id, title, description, category, owner, linkedIssues, severity } = req.body;
+  if (!title || !category) return res.status(400).json({ error: "Missing title or category" });
+
+  const riskId = id || `risk-${Date.now()}`;
+  const existing = roamRisks[riskId];
+  roamRisks[riskId] = {
+    id: riskId,
+    title,
+    description: description || "",
+    category, // "resolved" | "owned" | "accepted" | "mitigated"
+    owner: owner || "",
+    linkedIssues: linkedIssues || [],
+    severity: severity || "medium", // "low" | "medium" | "high" | "critical"
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  res.json(roamRisks[riskId]);
+});
+
+app.delete("/roam/risks/:id", (req, res) => {
+  delete roamRisks[req.params.id];
+  res.json({ ok: true });
+});
+
+// ─── Team Health Check (in-memory store) ─────────────────
+
+let healthChecks = {};
+
+app.get("/health-check/sessions", (req, res) => {
+  const sessions = Object.values(healthChecks)
+    .map(({ id, title, createdAt, responses }) => ({
+      id, title, createdAt, responseCount: responses.length,
+    }))
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  res.json(sessions);
+});
+
+app.post("/health-check/sessions", (req, res) => {
+  const id = `hc-${Date.now()}`;
+  const session = {
+    id,
+    title: req.body.title || `Health Check ${new Date().toISOString().split("T")[0]}`,
+    createdAt: new Date().toISOString(),
+    categories: [
+      { id: "mission", label: "Mission & Purpose", emoji: "🎯" },
+      { id: "speed", label: "Delivery Speed", emoji: "🚀" },
+      { id: "quality", label: "Code Quality", emoji: "✨" },
+      { id: "fun", label: "Fun & Teamwork", emoji: "🎉" },
+      { id: "learning", label: "Learning & Growth", emoji: "📚" },
+      { id: "support", label: "Support & Tools", emoji: "🛠️" },
+      { id: "communication", label: "Communication", emoji: "💬" },
+      { id: "autonomy", label: "Autonomy", emoji: "🗽" },
+    ],
+    responses: [],
+  };
+  healthChecks[id] = session;
+  res.json(session);
+});
+
+app.get("/health-check/sessions/:id", (req, res) => {
+  const session = healthChecks[req.params.id];
+  if (!session) return res.status(404).json({ error: "Session not found" });
+
+  // Aggregate scores
+  const aggregated = {};
+  for (const cat of session.categories) {
+    const catResponses = session.responses.filter(r => r.categoryId === cat.id);
+    const scores = catResponses.map(r => r.score);
+    aggregated[cat.id] = {
+      ...cat,
+      avg: scores.length > 0 ? Math.round((scores.reduce((s, v) => s + v, 0) / scores.length) * 10) / 10 : 0,
+      count: scores.length,
+      distribution: { green: scores.filter(s => s >= 4).length, yellow: scores.filter(s => s === 3).length, red: scores.filter(s => s <= 2).length },
+    };
+  }
+
+  res.json({ ...session, aggregated });
+});
+
+app.post("/health-check/sessions/:id/vote", (req, res) => {
+  const session = healthChecks[req.params.id];
+  if (!session) return res.status(404).json({ error: "Session not found" });
+
+  const { voter, categoryId, score, comment } = req.body;
+  if (!categoryId || score == null) return res.status(400).json({ error: "Missing categoryId or score" });
+
+  session.responses.push({
+    id: `vote-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+    voter: voter || "Anonymous",
+    categoryId,
+    score: Math.min(5, Math.max(1, parseInt(score))),
+    comment: comment || "",
+    createdAt: new Date().toISOString(),
+  });
+  res.json({ ok: true });
+});
+
+app.delete("/health-check/sessions/:id", (req, res) => {
+  delete healthChecks[req.params.id];
+  res.json({ ok: true });
+});
+
+// ─── Sprint Goals Tracker (in-memory store) ──────────────
+
+let sprintGoals = {};
+
+app.get("/sprint-goals", (req, res) => {
+  const goals = Object.values(sprintGoals)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  res.json(goals);
+});
+
+app.post("/sprint-goals", (req, res) => {
+  const { id, sprintName, goals } = req.body;
+  if (!sprintName || !goals || !Array.isArray(goals)) {
+    return res.status(400).json({ error: "Missing sprintName or goals array" });
+  }
+
+  const goalId = id || `sg-${Date.now()}`;
+  const existing = sprintGoals[goalId];
+  sprintGoals[goalId] = {
+    id: goalId,
+    sprintName,
+    goals: goals.map((g, i) => ({
+      id: g.id || `g-${Date.now()}-${i}`,
+      text: g.text,
+      status: g.status || "not_started", // "not_started" | "in_progress" | "achieved" | "missed"
+      linkedIssues: g.linkedIssues || [],
+      notes: g.notes || "",
+    })),
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  res.json(sprintGoals[goalId]);
+});
+
+app.delete("/sprint-goals/:id", (req, res) => {
+  delete sprintGoals[req.params.id];
+  res.json({ ok: true });
+});
+
+// ─── AI Coach Endpoint ───────────────────────────────────
+
+app.post("/ai/coach", async (req, res) => {
+  try {
+    const { context, question, data } = req.body;
+    if (!context || !question) {
+      return res.status(400).json({ error: "Missing context or question" });
+    }
+
+    // Build the prompt and return it — no external AI provider call
+    const prompt = `You are an experienced Agile Coach and Scrum Master. You help teams improve their agile practices, identify process issues, and suggest actionable improvements.
+
+CONTEXT: ${context}
+
+DATA:
+${JSON.stringify(data || {}, null, 2).substring(0, 8000)}
+
+USER QUESTION: ${question}
+
+Provide a helpful, actionable response. Be specific and reference the data when possible. Keep your response concise but thorough. Use bullet points for recommendations. If suggesting process changes, explain the "why" behind each suggestion.`;
+
+    res.json({ prompt, context, question });
+  } catch (err) {
+    console.error("Error in AI coach:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Cross-Project Dependencies ──────────────────────────
+
+app.get("/dependencies", async (req, res) => {
+  try {
+    // Fetch issues from all configured projects/servers
+    const projectKeys = new Set();
+    for (const team of TEAMS) {
+      if (team.projectKey) projectKeys.add(team.projectKey);
+    }
+    for (const server of JIRA_SERVERS) {
+      for (const pk of server.projects || []) projectKeys.add(pk);
+    }
+
+    const allProjects = [...projectKeys];
+    if (allProjects.length === 0) allProjects.push(JIRA_PROJECT_KEY);
+
+    // Build JQL to fetch from all projects
+    const projectsJql = req.query.jql || `project in (${allProjects.join(",")}) AND statusCategory != Done ORDER BY priority ASC, updated DESC`;
+    const fieldsStr = `summary,status,assignee,priority,issuetype,created,updated,duedate,issuelinks,${EPIC_LINK_FIELDS.join(",")},parent,labels`;
+
+    const data = await jiraSearchAll(projectsJql, fieldsStr, 200);
+
+    // Build dependency graph
+    const nodes = {};
+    const edges = [];
+    const crossProjectEdges = [];
+
+    for (const issue of data.issues) {
+      const f = issue.fields;
+      const project = issue.key.split("-")[0];
+      nodes[issue.key] = {
+        key: issue.key,
+        project,
+        summary: f.summary,
+        status: f.status?.name,
+        statusCategory: f.status?.statusCategory?.key,
+        assignee: f.assignee?.displayName,
+        priority: f.priority?.name,
+        issueType: f.issuetype?.name,
+        dueDate: f.duedate,
+        epicKey: getEpicKey(f),
+        labels: f.labels || [],
+      };
+
+      for (const link of f.issuelinks || []) {
+        const target = link.outwardIssue || link.inwardIssue;
+        if (!target) continue;
+
+        const targetProject = target.key.split("-")[0];
+        const edge = {
+          from: link.outwardIssue ? issue.key : target.key,
+          to: link.outwardIssue ? target.key : issue.key,
+          type: link.type?.name,
+          direction: link.outwardIssue ? link.type?.outward : link.type?.inward,
+          fromProject: link.outwardIssue ? project : targetProject,
+          toProject: link.outwardIssue ? targetProject : project,
+          isCrossProject: project !== targetProject,
+          targetStatus: target.fields?.status?.name,
+          targetStatusCategory: target.fields?.status?.statusCategory?.key,
+          targetSummary: target.fields?.summary,
+          targetPriority: target.fields?.priority?.name,
+        };
+
+        edges.push(edge);
+        if (edge.isCrossProject) crossProjectEdges.push(edge);
+
+        // Add target node if not already known
+        if (!nodes[target.key]) {
+          nodes[target.key] = {
+            key: target.key,
+            project: targetProject,
+            summary: target.fields?.summary,
+            status: target.fields?.status?.name,
+            statusCategory: target.fields?.status?.statusCategory?.key,
+            priority: target.fields?.priority?.name,
+            issueType: target.fields?.issuetype?.name,
+            external: true, // not in our JQL result set
+          };
+        }
+      }
+    }
+
+    // Analyze blocking chains
+    const blockingEdges = edges.filter(e =>
+      e.direction?.toLowerCase().includes("block") ||
+      e.type?.toLowerCase().includes("block")
+    );
+    const blockedByExternal = blockingEdges.filter(e => e.isCrossProject);
+
+    // Project-to-project matrix
+    const projectMatrix = {};
+    for (const edge of crossProjectEdges) {
+      const pairKey = [edge.fromProject, edge.toProject].sort().join(" <-> ");
+      if (!projectMatrix[pairKey]) projectMatrix[pairKey] = { pair: pairKey, projects: [edge.fromProject, edge.toProject].sort(), count: 0, blocking: 0, edges: [] };
+      projectMatrix[pairKey].count++;
+      if (edge.direction?.toLowerCase().includes("block")) projectMatrix[pairKey].blocking++;
+      projectMatrix[pairKey].edges.push(edge);
+    }
+
+    // Critical path: issues that block the most other issues
+    const blockCount = {};
+    for (const edge of blockingEdges) {
+      blockCount[edge.from] = (blockCount[edge.from] || 0) + 1;
+    }
+    const criticalBlockers = Object.entries(blockCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([key, count]) => ({ ...nodes[key], blocksCount: count }));
+
+    res.json({
+      projects: allProjects,
+      nodes: Object.values(nodes),
+      edges,
+      crossProjectEdges,
+      projectMatrix: Object.values(projectMatrix).sort((a, b) => b.count - a.count),
+      stats: {
+        totalNodes: Object.keys(nodes).length,
+        totalEdges: edges.length,
+        crossProjectCount: crossProjectEdges.length,
+        blockingCount: blockingEdges.length,
+        crossProjectBlockingCount: blockedByExternal.length,
+      },
+      criticalBlockers,
+    });
+  } catch (err) {
+    console.error("Error fetching dependencies:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── AI Dependency Discovery ─────────────────────────────
+
+app.post("/dependencies/discover", async (req, res) => {
+  try {
+    const { projects } = req.body;
+    // Determine which projects to analyze
+    const projectKeys = new Set();
+    if (projects && Array.isArray(projects)) {
+      projects.forEach(p => projectKeys.add(p));
+    } else {
+      for (const team of TEAMS) {
+        if (team.projectKey) projectKeys.add(team.projectKey);
+      }
+      for (const server of JIRA_SERVERS) {
+        for (const pk of server.projects || []) projectKeys.add(pk);
+      }
+    }
+    const allProjects = [...projectKeys];
+    if (allProjects.length === 0) allProjects.push(JIRA_PROJECT_KEY);
+
+    // Fetch active issues from all projects
+    const projectIssues = {};
+    for (const pk of allProjects) {
+      const jql = `project = ${pk} AND statusCategory != Done ORDER BY priority ASC, updated DESC`;
+      const fieldsStr = `summary,status,assignee,priority,issuetype,description,labels,duedate,${EPIC_LINK_FIELDS.join(",")},parent`;
+      const data = await jiraSearchAll(jql, fieldsStr, 100);
+      projectIssues[pk] = data.issues.map(i => ({
+        key: i.key,
+        summary: i.fields.summary,
+        description: (i.fields.description || "").substring(0, 500),
+        status: i.fields.status?.name,
+        statusCategory: i.fields.status?.statusCategory?.key,
+        assignee: i.fields.assignee?.displayName,
+        priority: i.fields.priority?.name,
+        issueType: i.fields.issuetype?.name,
+        labels: i.fields.labels || [],
+        dueDate: i.fields.duedate,
+        epicKey: getEpicKey(i.fields),
+        epicName: i.fields.parent?.fields?.summary || getEpicName(i.fields),
+      }));
+    }
+
+    // Build prompt for AI
+    const ticketSummaries = {};
+    for (const [pk, issues] of Object.entries(projectIssues)) {
+      ticketSummaries[pk] = issues.map(i =>
+        `  ${i.key} | ${i.issueType} | ${i.summary} | Status: ${i.status} | Assignee: ${i.assignee || "Unassigned"} | Labels: ${i.labels.join(",")} | Due: ${i.dueDate || "none"}\n    Desc: ${i.description.substring(0, 200)}`
+      ).join("\n");
+    }
+
+    const projectSections = Object.entries(ticketSummaries)
+      .map(([pk, text]) => `PROJECT: ${pk}\n${text}`)
+      .join("\n\n");
+
+    // Build the prompt and return it — no external AI provider call
+    const prompt = `You are an expert Agile Coach and Program Manager. Analyze tickets across multiple Jira projects to discover dependencies, shared work, blockers, and coordination needs.
+
+PROJECTS AND THEIR ACTIVE TICKETS:
+${projectSections.substring(0, 12000)}
+
+TASK: Identify all cross-project dependencies, shared concerns, and coordination needs. Look for:
+1. **Blocking dependencies**: Ticket A in project X cannot proceed until ticket B in project Y is done
+2. **Shared components**: Tickets across projects that touch the same system, API, database, or service
+3. **Data dependencies**: One project produces data/APIs another project consumes
+4. **Sequential work**: Work that must happen in a specific order across projects
+5. **Shared resources**: Same person assigned across projects (resource conflict)
+6. **Similar/duplicate work**: Overlapping scope between projects
+7. **Risk propagation**: A delay in one project that would impact another
+
+Respond with ONLY valid JSON (no markdown, no backticks):
+{
+  "dependencies": [
+    {
+      "from": "PROJ-123",
+      "to": "OTHER-456",
+      "type": "blocks|shared_component|data_dependency|sequential|resource_conflict|duplicate|risk",
+      "confidence": "high|medium|low",
+      "reason": "Brief explanation of why these are dependent",
+      "impact": "high|medium|low",
+      "recommendation": "What the team should do about this dependency"
+    }
+  ],
+  "risks": [
+    {
+      "description": "Cross-project risk description",
+      "affectedProjects": ["PROJ", "OTHER"],
+      "severity": "high|medium|low",
+      "mitigation": "Suggested action"
+    }
+  ],
+  "recommendations": [
+    "Overall coordination recommendation 1",
+    "Overall coordination recommendation 2"
+  ],
+  "sharedResources": [
+    {
+      "person": "Name",
+      "projects": ["PROJ", "OTHER"],
+      "ticketCount": 5,
+      "risk": "Overloaded / context switching"
+    }
+  ]
+}`;
+
+    // Return prompt + issue data so frontend can enrich after user pastes AI response
+    const allIssues = Object.values(projectIssues).flat();
+    const issueMap = {};
+    for (const issue of allIssues) issueMap[issue.key] = issue;
+
+    res.json({
+      prompt,
+      projects: allProjects,
+      projectIssueCounts: Object.fromEntries(Object.entries(projectIssues).map(([k, v]) => [k, v.length])),
+      issueMap,
+      totalAnalyzed: allIssues.length,
+    });
+  } catch (err) {
+    console.error("Error discovering dependencies:", err.message);
     res.status(500).json({ error: err.message });
   }
 });

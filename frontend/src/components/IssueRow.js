@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import UrgencyBadge from "./UrgencyBadge";
 import IssueHoverCard from "./IssueHoverCard";
 
@@ -51,6 +52,15 @@ export default function IssueRow({ issue, jiraBaseUrl }) {
         <p className="flex-1 text-sm text-gray-800 truncate min-w-0">
           {issue.summary}
         </p>
+
+        {/* AI Prompt link */}
+        <Link
+          href={`/issue/${issue.key}`}
+          onClick={(e) => e.stopPropagation()}
+          className="text-[10px] text-purple-600 hover:text-purple-800 hover:underline shrink-0"
+        >
+          AI Prompt
+        </Link>
 
         {/* Urgency flags */}
         <div className="flex flex-wrap gap-1 shrink-0 max-w-[200px]">

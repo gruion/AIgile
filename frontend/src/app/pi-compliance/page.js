@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { fetchPiCompliance } from "../../lib/api";
+import JqlBar from "../../components/JqlBar";
 import ComplianceStepper from "../../components/ComplianceStepper";
 import { toast } from "../../components/Toaster";
 
@@ -138,12 +139,14 @@ export default function PiCompliancePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [showStepper, setShowStepper] = useState(false);
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchPiCompliance();
+      const result = await fetchPiCompliance(jql || undefined);
       setData(result);
       toast.success("PI compliance data loaded");
     } catch (err) {
@@ -153,7 +156,7 @@ export default function PiCompliancePage() {
     setLoading(false);
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [jql]);
 
   return (
     <div className="min-h-screen">
@@ -174,6 +177,8 @@ export default function PiCompliancePage() {
             <strong>Error:</strong> {error}
           </div>
         )}
+
+        <JqlBar value={inputJql} onChange={setInputJql} onSubmit={(q) => setJql(q)} />
 
         {loading && (
           <div className="flex items-center justify-center py-12">

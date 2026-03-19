@@ -6,6 +6,7 @@ import EpicCard from "../components/EpicCard";
 import IssueRow from "../components/IssueRow";
 import FilterBar from "../components/FilterBar";
 import JqlBar from "../components/JqlBar";
+import AiCoachPanel from "../components/AiCoachPanel";
 import { fetchIssues } from "../lib/api";
 import { toast } from "../components/Toaster";
 
@@ -174,6 +175,61 @@ export default function Home() {
           </div>
         )}
 
+        {/* AI Coach Panel */}
+        {!loading && data && data.total > 0 && (
+          <div className="mb-4">
+            <AiCoachPanel
+              context="Project Dashboard"
+              data={data}
+              prompts={[
+                {
+                  label: "Full Project Summary",
+                  primary: true,
+                  question: `Generate a comprehensive project summary covering ALL of the following. Be specific — reference ticket keys, assignees, dates, and epics.
+
+1. **PROJECT STATUS OVERVIEW**: Overall health of the project. How many total issues, how many done vs in progress vs to do? What percentage is complete?
+
+2. **EPIC-BY-EPIC BREAKDOWN**: For each epic, summarize:
+   - Progress (done/total, % complete)
+   - Current status and key in-progress work
+   - Blockers or risks
+   - Overdue or stale items
+
+3. **WHAT'S BEEN DONE** (recently completed): List recently resolved items grouped by epic, in chronological order (newest first).
+
+4. **WHAT'S IN PROGRESS**: All items currently being worked on, grouped by assignee, with status and due dates.
+
+5. **WHAT'S COMING NEXT**: Upcoming work — items in To Do or backlog, ordered by priority and due date. Highlight anything due soon.
+
+6. **RISKS & BLOCKERS**: Overdue items, stale items (no update in 7+ days), unassigned high-priority items, items with no due date.
+
+7. **TEAM WORKLOAD**: Who is working on what, who is overloaded, who has capacity.
+
+8. **RECOMMENDATIONS**: Top 5 actions to improve project health, with owners and urgency.
+
+Format with clear headers and bullet points. This should serve as a complete project status report.`,
+                },
+                {
+                  label: "Progress report",
+                  question: "Summarize overall project progress. What percentage is done? Which epics are on track and which are behind? What are the key milestones achieved recently?",
+                },
+                {
+                  label: "Risks & blockers",
+                  question: "Identify all risks and blockers across the project. Which items are overdue, stale, or unassigned? What's the impact and what should be done?",
+                },
+                {
+                  label: "Upcoming work",
+                  question: "What work is coming up next? List items by priority and due date. What should the team focus on in the next sprint?",
+                },
+                {
+                  label: "Epic health",
+                  question: "Analyze the health of each epic. Which epics are on track, at risk, or behind schedule? Provide a progress percentage and key issues for each.",
+                },
+              ]}
+            />
+          </div>
+        )}
+
         {/* Epic cards */}
         {!loading && filteredEpics && (
           <div className="space-y-4">
@@ -213,6 +269,7 @@ export default function Home() {
             <p className="text-sm">Try adjusting your JQL query</p>
           </div>
         )}
+
       </main>
     </div>
   );

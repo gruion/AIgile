@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from "react";
 import { fetchQuickQueries, createBookmark, deleteBookmark } from "../lib/api";
 import { toast } from "./Toaster";
 
-export default function JqlBar({ value, onChange, onSubmit, placeholder = "Enter JQL query..." }) {
+export default function JqlBar({ value, onChange, onSubmit, placeholder = "Enter JQL query...", defaultCollapsed = true }) {
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null);
   const [bookmarkName, setBookmarkName] = useState("");
@@ -63,6 +64,25 @@ export default function JqlBar({ value, onChange, onSubmit, placeholder = "Enter
 
   return (
     <div className="relative" ref={ref}>
+      {/* Collapsible header */}
+      <button
+        type="button"
+        onClick={() => setCollapsed((c) => !c)}
+        className="w-full flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors mb-1"
+      >
+        <svg className="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        <span className="text-xs font-semibold text-gray-600">JQL Query Bar</span>
+        {value && (
+          <span className="text-[10px] text-gray-400 font-mono truncate ml-1 max-w-[60%]">{value}</span>
+        )}
+        <svg className={`w-3.5 h-3.5 text-gray-400 ml-auto transition-transform ${collapsed ? "" : "rotate-180"}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {!collapsed && (<>
       <form onSubmit={handleFormSubmit} className="flex gap-2">
         {/* Dropdown trigger */}
         <button
@@ -251,6 +271,7 @@ export default function JqlBar({ value, onChange, onSubmit, placeholder = "Enter
           </div>
         </div>
       )}
+      </>)}
     </div>
   );
 }

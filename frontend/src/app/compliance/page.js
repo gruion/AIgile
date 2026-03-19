@@ -3,6 +3,8 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { fetchProjectCompliance } from "../../lib/api";
+import JqlBar from "../../components/JqlBar";
+import AiCoachPanel from "../../components/AiCoachPanel";
 import ComplianceStepper from "../../components/ComplianceStepper";
 import { toast } from "../../components/Toaster";
 
@@ -96,12 +98,17 @@ export default function CompliancePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [stepperProject, setStepperProject] = useState(null); // team id of project in stepper mode
+  const [expandedProjects, setExpandedProjects] = useState({}); // { teamId: true/false }
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
+
+  const toggleProject = (id) => setExpandedProjects((prev) => ({ ...prev, [id]: !prev[id] }));
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchProjectCompliance();
+      const result = await fetchProjectCompliance(jql || undefined);
       setData(result);
       toast.success("Compliance data loaded");
     } catch (err) {
@@ -111,7 +118,7 @@ export default function CompliancePage() {
     setLoading(false);
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [jql]);
 
   const overallScore = data?.projects
     ? Math.round(data.projects.reduce((sum, p) => sum + p.score, 0) / Math.max(data.projects.length, 1))
@@ -137,9 +144,34 @@ export default function CompliancePage() {
           </div>
         )}
 
+        <JqlBar value={inputJql} onChange={setInputJql} onSubmit={(q) => setJql(q)} />
+
         {loading && (
           <div className="flex items-center justify-center py-12">
             <div className="animate-spin h-8 w-8 border-4 border-blue-200 border-t-blue-600 rounded-full" />
+          </div>
+        )}
+
+        {/* AI Coach */}
+        {data && (
+          <div className="mb-4">
+            <AiCoachPanel
+              context="Project Compliance Dashboard"
+              data={{
+                projects: (data.projects || []).map(p => ({
+                  name: p.projectKey,
+                  score: p.overallScore,
+                  failedChecks: p.checks?.filter(c => c.status === "fail").map(c => c.name),
+                  warningChecks: p.checks?.filter(c => c.status === "warning").map(c => c.name),
+                })),
+              }}
+              prompts={[
+                { label: "Compliance summary", question: "Summarize the project compliance status. What are the critical issues?" },
+                { label: "Quick wins", question: "What are the easiest compliance checks to fix that would give the biggest score improvement?" },
+                { label: "Action plan", question: "Create a prioritized action plan to improve compliance scores across all projects." },
+                { label: "Best practices", question: "Which agile best practices are we missing? How do we compare to industry standards?" },
+              ]}
+            />
           </div>
         )}
 
@@ -173,12 +205,19 @@ export default function CompliancePage() {
               {data.projects.map((project) => {
                 const hasFailing = project.checks.some((c) => c.status !== "pass");
                 const inStepper = stepperProject === project.team.id;
+                const isExpanded = expandedProjects[project.team.id] !== false; // default open
                 return (
                   <div key={project.team.id} className="space-y-3">
-                    {/* Project header */}
-                    <div className="flex items-center gap-4">
+                    {/* Project header — click to toggle */}
+                    <button
+                      onClick={() => toggleProject(project.team.id)}
+                      className="w-full flex items-center gap-4 hover:bg-gray-50 rounded-lg p-2 -m-2 transition-colors cursor-pointer"
+                    >
+                      <svg className={`w-4 h-4 text-gray-400 shrink-0 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                      </svg>
                       <div className="w-4 h-4 rounded-full shrink-0" style={{ backgroundColor: project.team.color }} />
-                      <div className="flex-1">
+                      <div className="flex-1 text-left">
                         <div className="flex items-center gap-3">
                           <h3 className="text-base font-bold text-gray-900">{project.team.name}</h3>
                           <span className="text-xs font-mono text-gray-400">{project.team.projectKey}</span>
@@ -197,44 +236,49 @@ export default function CompliancePage() {
                         )}
                       </div>
                       <div className="flex items-center gap-3">
-                        {hasFailing && (
-                          <button
-                            onClick={() => setStepperProject(inStepper ? null : project.team.id)}
-                            className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
-                              inStepper
-                                ? "bg-gray-200 text-gray-600"
-                                : "bg-orange-500 hover:bg-orange-600 text-white"
-                            }`}
-                          >
-                            {inStepper ? "Show All" : "Fix Issues"}
-                          </button>
-                        )}
                         <ScoreRing score={project.score} size={70} />
                       </div>
-                    </div>
+                    </button>
 
-                    {/* Stepper mode or check grid */}
-                    <div className="ml-8">
-                      {inStepper ? (
-                        <ComplianceStepper
-                          checks={project.checks}
-                          onReload={load}
-                          loading={loading}
-                        />
-                      ) : (
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                          {project.checks.map((check) => (
-                            <CheckCard key={check.id} check={check} />
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    {/* Collapsible content */}
+                    {isExpanded && (
+                      <div className="ml-8">
+                        {hasFailing && (
+                          <div className="mb-3">
+                            <button
+                              onClick={() => setStepperProject(inStepper ? null : project.team.id)}
+                              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                                inStepper
+                                  ? "bg-gray-200 text-gray-600"
+                                  : "bg-orange-500 hover:bg-orange-600 text-white"
+                              }`}
+                            >
+                              {inStepper ? "Show All Checks" : "Fix Issues Step by Step"}
+                            </button>
+                          </div>
+                        )}
+                        {inStepper ? (
+                          <ComplianceStepper
+                            checks={project.checks}
+                            onReload={load}
+                            loading={loading}
+                          />
+                        ) : (
+                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                            {project.checks.map((check) => (
+                              <CheckCard key={check.id} check={check} />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
           </>
         )}
+
       </main>
     </div>
   );

@@ -3,6 +3,8 @@
 import { useState, useEffect, useMemo } from "react";
 import { fetchPiOverview, fetchPiFollowUps, fetchProgramBoard, fetchConfig, updateConfig, fetchPiCompliance } from "../../lib/api";
 import IssueHoverCard from "../../components/IssueHoverCard";
+import JqlBar from "../../components/JqlBar";
+import AiCoachPanel from "../../components/AiCoachPanel";
 import { toast } from "../../components/Toaster";
 
 const SEVERITY_COLORS = {
@@ -89,6 +91,8 @@ export default function PiPlanningPage() {
   const [showConfig, setShowConfig] = useState(false);
   const [filterMode, setFilterMode] = useState("pi"); // "pi" | "all" | "sprint"
   const [sprintFilter, setSprintFilter] = useState("");
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
 
   // Config form state
   const [configForm, setConfigForm] = useState({ teams: [], piConfig: { enabled: false }, disabledPiChecks: [] });
@@ -100,7 +104,7 @@ export default function PiPlanningPage() {
     try {
       const f = filter || filterMode;
       const [piData, cfg, piCompliance] = await Promise.all([
-        fetchPiOverview({ filter: f, sprint: f === "sprint" ? sprintFilter : undefined }),
+        fetchPiOverview({ filter: f, sprint: f === "sprint" ? sprintFilter : undefined, jql: jql || undefined }),
         fetchConfig(),
         fetchPiCompliance().catch(() => null),
       ]);
@@ -131,7 +135,7 @@ export default function PiPlanningPage() {
     } catch {}
   };
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => { loadData(); }, [jql]);
   useEffect(() => { if (activeTab === "follow-ups") loadFollowUps(); }, [activeTab]);
   useEffect(() => { if (activeTab === "program-board") loadProgramBoard(); }, [activeTab]);
 
@@ -245,11 +249,49 @@ export default function PiPlanningPage() {
           </div>
         )}
 
+        <JqlBar value={inputJql} onChange={setInputJql} onSubmit={(q) => setJql(q)} />
+
         {loading && (
           <div className="flex items-center justify-center py-12">
             <div className="animate-spin h-8 w-8 border-4 border-blue-200 border-t-blue-600 rounded-full" />
           </div>
         )}
+
+        {/* AI Coach */}
+        <div className="mb-4">
+          <AiCoachPanel
+            context="PI Planning"
+            data={{ overview: data, followUps, programBoard }}
+            prompts={[
+              {
+                label: "PI Health Analysis",
+                primary: true,
+                question:
+                  "Analyze the PI plan across all teams. Assess: cross-team dependency risks, capacity vs commitment gaps for each team, teams that are overcommitted or undercommitted, and the overall PI feasibility. Reference specific teams and metrics.",
+              },
+              {
+                label: "Cross-Team Dependencies",
+                question:
+                  "Identify all cross-team dependencies and their risks. Which dependencies are most likely to cause delays? Suggest mitigation strategies and communication plans for each high-risk dependency.",
+              },
+              {
+                label: "PI Objectives Suggestion",
+                question:
+                  "Based on the planned work across all teams, suggest 3-5 measurable PI objectives. Each should be specific, achievable within the PI, and tied to business value.",
+              },
+              {
+                label: "Feature Prioritization",
+                question:
+                  "Analyze the features and epics across teams. Which should be prioritized based on business value, dependencies, and risk? Suggest a WSJF (Weighted Shortest Job First) ranking.",
+              },
+              {
+                label: "Capacity vs Commitment",
+                question:
+                  "For each team, compare their committed work against typical velocity/capacity. Highlight teams that are overcommitted and suggest what to descope. Highlight teams with slack and suggest what to pull in.",
+              },
+            ]}
+          />
+        </div>
 
         {/* ═══ TEAM CONFIGURATION PANEL ═══ */}
         {showConfig && (

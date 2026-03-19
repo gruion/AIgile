@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { fetchInsightsSummaries, fetchBoardSummary } from "../../lib/api";
+import JqlBar from "../../components/JqlBar";
 
 const RISK_COLORS = {
   high: { bg: "bg-red-50", text: "text-red-700", border: "border-red-200", badge: "bg-red-100 text-red-800" },
@@ -130,6 +131,8 @@ export default function InsightsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [riskFilter, setRiskFilter] = useState("all");
+  const [jql, setJql] = useState("");
+  const [inputJql, setInputJql] = useState("");
 
   useEffect(() => {
     async function load() {
@@ -212,6 +215,8 @@ export default function InsightsPage() {
             </p>
           </div>
         )}
+
+        <JqlBar value={inputJql} onChange={setInputJql} onSubmit={(q) => setJql(q)} />
 
         {loading && (
           <div className="flex items-center justify-center py-12">

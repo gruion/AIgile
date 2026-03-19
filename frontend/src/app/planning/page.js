@@ -1,26 +1,27 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import JqlBar from "../../components/JqlBar";
 import ResizableTable from "../../components/ResizableTable";
 import IssueHoverCard from "../../components/IssueHoverCard";
 import { fetchIssues, fetchPiOverview, fetchConfig } from "../../lib/api";
 import { toast } from "../../components/Toaster";
+import AiCoachPanel from "../../components/AiCoachPanel";
 
 const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
 
-// ─── Color palette (shared with gantt) ──────────────────
+// ─── Color palette ──────────────────────────────────────
 const EPIC_COLORS = [
-  { bg: "bg-blue-500", light: "bg-blue-100", text: "text-blue-800", border: "border-blue-300", hex: "#3b82f6" },
-  { bg: "bg-emerald-500", light: "bg-emerald-100", text: "text-emerald-800", border: "border-emerald-300", hex: "#10b981" },
-  { bg: "bg-violet-500", light: "bg-violet-100", text: "text-violet-800", border: "border-violet-300", hex: "#8b5cf6" },
-  { bg: "bg-amber-500", light: "bg-amber-100", text: "text-amber-800", border: "border-amber-300", hex: "#f59e0b" },
-  { bg: "bg-rose-500", light: "bg-rose-100", text: "text-rose-800", border: "border-rose-300", hex: "#f43f5e" },
-  { bg: "bg-cyan-500", light: "bg-cyan-100", text: "text-cyan-800", border: "border-cyan-300", hex: "#06b6d4" },
-  { bg: "bg-orange-500", light: "bg-orange-100", text: "text-orange-800", border: "border-orange-300", hex: "#f97316" },
-  { bg: "bg-indigo-500", light: "bg-indigo-100", text: "text-indigo-800", border: "border-indigo-300", hex: "#6366f1" },
-  { bg: "bg-pink-500", light: "bg-pink-100", text: "text-pink-800", border: "border-pink-300", hex: "#ec4899" },
-  { bg: "bg-teal-500", light: "bg-teal-100", text: "text-teal-800", border: "border-teal-300", hex: "#14b8a6" },
+  { bg: "bg-blue-500", light: "bg-blue-100", text: "text-blue-800", border: "border-blue-300" },
+  { bg: "bg-emerald-500", light: "bg-emerald-100", text: "text-emerald-800", border: "border-emerald-300" },
+  { bg: "bg-violet-500", light: "bg-violet-100", text: "text-violet-800", border: "border-violet-300" },
+  { bg: "bg-amber-500", light: "bg-amber-100", text: "text-amber-800", border: "border-amber-300" },
+  { bg: "bg-rose-500", light: "bg-rose-100", text: "text-rose-800", border: "border-rose-300" },
+  { bg: "bg-cyan-500", light: "bg-cyan-100", text: "text-cyan-800", border: "border-cyan-300" },
+  { bg: "bg-orange-500", light: "bg-orange-100", text: "text-orange-800", border: "border-orange-300" },
+  { bg: "bg-indigo-500", light: "bg-indigo-100", text: "text-indigo-800", border: "border-indigo-300" },
+  { bg: "bg-pink-500", light: "bg-pink-100", text: "text-pink-800", border: "border-pink-300" },
+  { bg: "bg-teal-500", light: "bg-teal-100", text: "text-teal-800", border: "border-teal-300" },
 ];
 
 const STATUS_COLORS = {
@@ -49,12 +50,6 @@ function addDays(date, days) {
   const d = new Date(date);
   d.setDate(d.getDate() + days);
   return d;
-}
-function formatDate(d) {
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
-}
-function formatMonthYear(d) {
-  return d.toLocaleDateString("en-GB", { month: "short", year: "numeric" });
 }
 function formatFullDate(d) {
   return d.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
@@ -132,141 +127,6 @@ function getCalendarDays(year, month) {
     current = addDays(current, 1);
   }
   return days;
-}
-
-// ─── Gantt computation ──────────────────────────────────
-function computeGanttData(issues) {
-  const DEFAULT_DURATION = 7;
-  const rows = [];
-
-  for (const issue of issues) {
-    const start = parseDate(issue.created);
-    if (!start) continue;
-    let end = parseDate(issue.dueDate);
-    if (!end) {
-      if (issue.statusCategory === "done") {
-        end = parseDate(issue.updated) || addDays(start, DEFAULT_DURATION);
-      } else {
-        end = addDays(new Date(), DEFAULT_DURATION);
-      }
-    }
-    if (end <= start) end = addDays(start, 1);
-
-    rows.push({
-      ...issue,
-      assignee: issue.assigneeName,
-      epicKey: issue.epicKey,
-      epicName: issue.epicName,
-      color: issue.color,
-      start: startOfDay(start),
-      end: startOfDay(end),
-    });
-  }
-
-  if (rows.length === 0) return { rows: [], timelineStart: new Date(), timelineEnd: new Date(), totalDays: 0 };
-
-  rows.sort((a, b) => {
-    if (a.epicKey !== b.epicKey) return a.epicKey < b.epicKey ? -1 : 1;
-    return a.start.getTime() - b.start.getTime();
-  });
-
-  const allDates = rows.flatMap((r) => [r.start, r.end]);
-  const minDate = new Date(Math.min(...allDates.map((d) => d.getTime())));
-  const maxDate = new Date(Math.max(...allDates.map((d) => d.getTime())));
-  const timelineStart = addDays(minDate, -2);
-  const timelineEnd = addDays(maxDate, 5);
-  const totalDays = daysBetween(timelineStart, timelineEnd);
-
-  return { rows, timelineStart, timelineEnd, totalDays };
-}
-
-// ─── Components ─────────────────────────────────────────
-
-function TodayMarker({ timelineStart, totalDays }) {
-  const today = startOfDay(new Date());
-  const offset = daysBetween(timelineStart, today);
-  const pct = (offset / totalDays) * 100;
-  if (pct < 0 || pct > 100) return null;
-  return (
-    <div className="absolute top-0 bottom-0 w-px bg-red-500 z-10 pointer-events-none" style={{ left: `${pct}%` }}>
-      <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[9px] font-bold text-red-600 bg-red-50 px-1.5 py-0.5 rounded whitespace-nowrap">Today</div>
-    </div>
-  );
-}
-
-function TimelineHeader({ timelineStart, totalDays }) {
-  const weeks = [];
-  let current = new Date(timelineStart);
-  const day = current.getDay();
-  current = addDays(current, day === 0 ? 1 : (8 - day) % 7);
-  while (daysBetween(timelineStart, current) < totalDays) {
-    weeks.push({ date: new Date(current), offset: daysBetween(timelineStart, current) });
-    current = addDays(current, 7);
-  }
-  const months = [];
-  let monthCurrent = new Date(timelineStart);
-  monthCurrent.setDate(1);
-  if (monthCurrent < timelineStart) monthCurrent.setMonth(monthCurrent.getMonth() + 1);
-  while (daysBetween(timelineStart, monthCurrent) < totalDays) {
-    months.push({ label: formatMonthYear(monthCurrent), offset: daysBetween(timelineStart, monthCurrent) });
-    monthCurrent = new Date(monthCurrent);
-    monthCurrent.setMonth(monthCurrent.getMonth() + 1);
-  }
-  return (
-    <div className="relative h-10 border-b border-gray-200 bg-gray-50">
-      {months.map((m, i) => (
-        <div key={i} className="absolute top-0 text-[10px] font-semibold text-gray-500 uppercase" style={{ left: `${(m.offset / totalDays) * 100}%` }}>
-          <span className="px-1">{m.label}</span>
-        </div>
-      ))}
-      {weeks.map((w, i) => (
-        <div key={i} className="absolute bottom-0 text-[9px] text-gray-400" style={{ left: `${(w.offset / totalDays) * 100}%` }}>
-          <div className="h-2 w-px bg-gray-300 mb-0.5" />
-          <span className="px-0.5">{formatDate(w.date)}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function GanttBar({ row, timelineStart, totalDays, onHover }) {
-  const startOffset = daysBetween(timelineStart, row.start);
-  const duration = daysBetween(row.start, row.end);
-  const leftPct = (startOffset / totalDays) * 100;
-  const widthPct = Math.max((duration / totalDays) * 100, 0.5);
-  const isDone = row.statusCategory === "done";
-  return (
-    <div
-      className="absolute top-1 bottom-1 rounded-md flex items-center overflow-hidden cursor-pointer group transition-all hover:shadow-md hover:z-10"
-      style={{ left: `${leftPct}%`, width: `${widthPct}%`, minWidth: "4px" }}
-      onMouseEnter={() => onHover(row)}
-      onMouseLeave={() => onHover(null)}
-    >
-      <div className={`absolute inset-0 ${row.color.bg} ${isDone ? "opacity-50" : ""}`} />
-      {isDone && (
-        <div className="absolute inset-0 overflow-hidden">
-          <div className="absolute inset-0" style={{ backgroundImage: "repeating-linear-gradient(135deg, transparent, transparent 3px, rgba(255,255,255,0.3) 3px, rgba(255,255,255,0.3) 6px)" }} />
-        </div>
-      )}
-      <span className="relative z-[1] text-[10px] text-white font-medium px-1.5 truncate drop-shadow-sm">{row.key}</span>
-    </div>
-  );
-}
-
-function GanttTooltip({ row }) {
-  if (!row) return null;
-  return (
-    <div className="bg-gray-900 text-white text-xs rounded-lg px-3 py-2 shadow-xl max-w-xs pointer-events-none">
-      <div className="font-bold mb-1">{row.key} — {row.summary}</div>
-      <div className="space-y-0.5 text-gray-300">
-        <div>Status: <span className="text-white">{row.status}</span></div>
-        <div>Assignee: <span className="text-white">{row.assignee || "Unassigned"}</span></div>
-        <div>Start: <span className="text-white">{formatDate(row.start)}</span></div>
-        <div>{row.dueDate ? "Due" : "Est. end"}: <span className="text-white">{formatDate(row.end)}</span></div>
-        <div>Epic: <span className="text-white">{row.epicName}</span></div>
-      </div>
-    </div>
-  );
 }
 
 // ─── Tab: Calendar ──────────────────────────────────────
@@ -553,145 +413,166 @@ function TaskListView({ issues }) {
   );
 }
 
-// ─── Tab: Gantt ─────────────────────────────────────────
-function GanttView({ issues }) {
-  const [hoveredRow, setHoveredRow] = useState(null);
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
-  const [hiddenEpics, setHiddenEpics] = useState(new Set());
-  const containerRef = useRef(null);
+// ─── Planning Insights Panel ─────────────────────────────
+function PlanningInsightsPanel({ issues }) {
+  const insights = useMemo(() => {
+    if (!issues.length) return [];
+    const today = startOfDay(new Date());
+    const items = [];
 
-  const gantt = useMemo(() => computeGanttData(issues), [issues]);
-
-  const filteredRows = useMemo(() => {
-    return gantt.rows.filter((r) => !hiddenEpics.has(r.epicKey));
-  }, [gantt, hiddenEpics]);
-
-  const groupedRows = useMemo(() => {
-    const groups = [];
-    let currentEpic = null;
-    for (const row of filteredRows) {
-      if (row.epicKey !== currentEpic) {
-        groups.push({ type: "epic", key: row.epicKey, name: row.epicName, color: row.color });
-        currentEpic = row.epicKey;
-      }
-      groups.push({ type: "task", ...row });
-    }
-    return groups;
-  }, [filteredRows]);
-
-  // Epic legend
-  const epicKeys = useMemo(() => {
-    const seen = new Map();
-    for (const row of gantt.rows) {
-      if (!seen.has(row.epicKey)) seen.set(row.epicKey, { name: row.epicName, color: row.color });
-    }
-    return seen;
-  }, [gantt]);
-
-  const toggleEpic = (key) => {
-    setHiddenEpics((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
+    // Overdue issues
+    const overdue = issues.filter((i) => {
+      const d = parseDate(i.dueDate);
+      return d && d < today && i.statusCategory !== "done";
     });
+    if (overdue.length > 0) {
+      items.push({
+        type: "error",
+        title: `${overdue.length} overdue issue${overdue.length > 1 ? "s" : ""}`,
+        detail: overdue.slice(0, 5).map((i) => `${i.key}: ${i.summary} (due ${formatFullDate(parseDate(i.dueDate))})`).join("; "),
+        tip: "Review and either re-estimate, reassign, or remove these from the sprint.",
+      });
+    }
+
+    // Due soon (within 3 days)
+    const dueSoon = issues.filter((i) => {
+      const d = parseDate(i.dueDate);
+      return d && d >= today && daysBetween(today, d) <= 3 && i.statusCategory !== "done";
+    });
+    if (dueSoon.length > 0) {
+      items.push({
+        type: "warning",
+        title: `${dueSoon.length} issue${dueSoon.length > 1 ? "s" : ""} due within 3 days`,
+        detail: dueSoon.slice(0, 5).map((i) => `${i.key}: ${i.summary}`).join("; "),
+        tip: "Ensure these are actively being worked on and blockers are cleared.",
+      });
+    }
+
+    // Unassigned issues
+    const unassigned = issues.filter((i) => !i.assigneeName && i.statusCategory !== "done");
+    if (unassigned.length > 0) {
+      items.push({
+        type: unassigned.length > issues.length * 0.3 ? "warning" : "info",
+        title: `${unassigned.length} unassigned issue${unassigned.length > 1 ? "s" : ""}`,
+        detail: `${Math.round((unassigned.length / issues.length) * 100)}% of active work has no owner.`,
+        tip: "Assign owners during planning to avoid work sitting idle.",
+      });
+    }
+
+    // No due dates
+    const noDue = issues.filter((i) => !i.dueDate && i.statusCategory !== "done");
+    if (noDue.length > issues.length * 0.5) {
+      items.push({
+        type: "warning",
+        title: `${noDue.length} issues without due dates`,
+        detail: `${Math.round((noDue.length / issues.length) * 100)}% of issues have no deadline set.`,
+        tip: "Add due dates to enable better tracking and predictability.",
+      });
+    }
+
+    // WIP overload (too many in progress)
+    const inProgress = issues.filter((i) => i.statusCategory === "indeterminate");
+    const assignees = new Set(issues.map((i) => i.assigneeName).filter(Boolean));
+    const teamSize = Math.max(assignees.size, 1);
+    if (inProgress.length > teamSize * 2) {
+      items.push({
+        type: "warning",
+        title: `High WIP: ${inProgress.length} items in progress`,
+        detail: `With ${teamSize} team member${teamSize > 1 ? "s" : ""}, that's ${(inProgress.length / teamSize).toFixed(1)} items per person.`,
+        tip: "Limit WIP to 2 per person. Finish work before starting new items.",
+      });
+    }
+
+    // Workload imbalance
+    const workload = {};
+    issues.filter((i) => i.statusCategory !== "done" && i.assigneeName).forEach((i) => {
+      workload[i.assigneeName] = (workload[i.assigneeName] || 0) + 1;
+    });
+    const loads = Object.values(workload);
+    if (loads.length >= 2) {
+      const max = Math.max(...loads);
+      const min = Math.min(...loads);
+      if (max >= min * 3 && max >= 5) {
+        const heaviest = Object.entries(workload).sort((a, b) => b[1] - a[1])[0];
+        items.push({
+          type: "info",
+          title: "Uneven workload distribution",
+          detail: `${heaviest[0]} has ${heaviest[1]} items while some have ${min}. Consider rebalancing.`,
+          tip: "Redistribute work for more even throughput and reduced bus factor.",
+        });
+      }
+    }
+
+    // Completion rate
+    const done = issues.filter((i) => i.statusCategory === "done").length;
+    const toDo = issues.filter((i) => i.statusCategory === "new").length;
+    const total = issues.length;
+    if (total >= 5) {
+      const completionPct = Math.round((done / total) * 100);
+      if (completionPct >= 80) {
+        items.push({
+          type: "success",
+          title: `${completionPct}% completion rate`,
+          detail: `${done} of ${total} issues are done. Sprint is on track.`,
+          tip: "Great progress! Consider pulling in stretch goals if capacity allows.",
+        });
+      } else if (completionPct < 30 && toDo > inProgress.length * 2) {
+        items.push({
+          type: "info",
+          title: `Only ${completionPct}% complete — ${toDo} items still in To Do`,
+          detail: "Most work hasn't started yet.",
+          tip: "Focus on starting and finishing items. Break large items into smaller deliverables.",
+        });
+      }
+    }
+
+    return items;
+  }, [issues]);
+
+  if (insights.length === 0) return null;
+
+  const iconMap = {
+    error: { bg: "bg-red-50", border: "border-red-200", icon: "text-red-500", badge: "bg-red-100 text-red-700", label: "Action Required" },
+    warning: { bg: "bg-amber-50", border: "border-amber-200", icon: "text-amber-500", badge: "bg-amber-100 text-amber-700", label: "Warning" },
+    info: { bg: "bg-blue-50", border: "border-blue-200", icon: "text-blue-500", badge: "bg-blue-100 text-blue-700", label: "Insight" },
+    success: { bg: "bg-green-50", border: "border-green-200", icon: "text-green-500", badge: "bg-green-100 text-green-700", label: "On Track" },
   };
 
-  const handleMouseMove = (e) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    setMousePos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+  const svgPaths = {
+    error: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z",
+    warning: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+    info: "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+    success: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z",
   };
-
-  const ROW_HEIGHT = 32;
-  const EPIC_ROW_HEIGHT = 28;
-
-  if (gantt.rows.length === 0) {
-    return <div className="text-center py-12 text-gray-400"><p className="text-lg mb-2">No issues to display on the timeline</p></div>;
-  }
 
   return (
-    <div>
-      {/* Epic legend */}
-      <div className="flex flex-wrap gap-2 mb-4">
-        {Array.from(epicKeys.entries()).map(([key, { name, color }]) => {
-          const hidden = hiddenEpics.has(key);
+    <div className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
+      <div className="flex items-center gap-2 mb-3">
+        <svg className="w-4 h-4 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+        </svg>
+        <h3 className="text-sm font-semibold text-gray-800">Planning Health Check</h3>
+        <span className="text-[10px] text-gray-400 ml-auto">Auto-generated from current data</span>
+      </div>
+      <div className="space-y-2">
+        {insights.map((item, i) => {
+          const style = iconMap[item.type];
           return (
-            <button
-              key={key}
-              onClick={() => toggleEpic(key)}
-              className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-all ${
-                hidden ? "bg-gray-100 text-gray-400 border-gray-200 line-through" : `${color.light} ${color.text} ${color.border}`
-              }`}
-            >
-              <span className={`w-2.5 h-2.5 rounded-full ${hidden ? "bg-gray-300" : color.bg}`} />
-              {name}
-            </button>
+            <div key={i} className={`flex gap-3 p-3 rounded-lg border ${style.bg} ${style.border}`}>
+              <svg className={`w-5 h-5 shrink-0 mt-0.5 ${style.icon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d={svgPaths[item.type]} />
+              </svg>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${style.badge}`}>{style.label}</span>
+                  <span className="text-sm font-medium text-gray-900">{item.title}</span>
+                </div>
+                <p className="text-xs text-gray-600 truncate">{item.detail}</p>
+                <p className="text-xs text-gray-500 mt-1 italic">{item.tip}</p>
+              </div>
+            </div>
           );
         })}
-      </div>
-
-      {/* Chart */}
-      <div ref={containerRef} className="relative bg-white rounded-xl border border-gray-200 overflow-auto" onMouseMove={handleMouseMove}>
-        <div className="flex" style={{ minWidth: "1000px" }}>
-          {/* Left: Row labels */}
-          <div className="w-64 shrink-0 border-r border-gray-200 bg-gray-50/50">
-            <div className="h-10 border-b border-gray-200 px-3 flex items-center">
-              <span className="text-[10px] font-semibold text-gray-400 uppercase">Ticket</span>
-            </div>
-            {groupedRows.map((item, i) => {
-              if (item.type === "epic") {
-                return (
-                  <div key={`epic-${item.key}-${i}`} className={`flex items-center gap-2 px-3 ${item.color.light} border-b border-t border-gray-200`} style={{ height: `${EPIC_ROW_HEIGHT}px` }}>
-                    <span className={`w-2 h-2 rounded-full ${item.color.bg}`} />
-                    <span className={`text-xs font-bold ${item.color.text} truncate`}>{item.name}</span>
-                  </div>
-                );
-              }
-              return (
-                <div key={item.key} className="flex items-center gap-2 px-3 border-b border-gray-100 hover:bg-gray-50" style={{ height: `${ROW_HEIGHT}px` }}>
-                  <IssueHoverCard issue={item} jiraBaseUrl={JIRA_BASE_URL}>
-                    <a href={`${JIRA_BASE_URL}/browse/${item.key}`} target="_blank" rel="noopener noreferrer" className="text-[10px] font-mono text-blue-600 w-16 shrink-0 hover:underline">{item.key}</a>
-                  </IssueHoverCard>
-                  <span className="text-xs text-gray-700 truncate flex-1">{item.summary}</span>
-                  <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${
-                    item.statusCategory === "done" ? "bg-green-100 text-green-700"
-                    : item.statusCategory === "indeterminate" ? "bg-blue-100 text-blue-700"
-                    : "bg-gray-100 text-gray-600"
-                  }`}>{item.status}</span>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Right: Timeline */}
-          <div className="flex-1 relative">
-            <TimelineHeader timelineStart={gantt.timelineStart} totalDays={gantt.totalDays} />
-            <div className="absolute top-10 bottom-0 left-0 right-0">
-              {Array.from({ length: Math.ceil(gantt.totalDays / 7) }).map((_, i) => {
-                const pct = ((i * 7) / gantt.totalDays) * 100;
-                return <div key={i} className="absolute top-0 bottom-0 w-px bg-gray-100" style={{ left: `${pct}%` }} />;
-              })}
-              <TodayMarker timelineStart={gantt.timelineStart} totalDays={gantt.totalDays} />
-            </div>
-            <div className="relative">
-              {groupedRows.map((item, i) => {
-                if (item.type === "epic") {
-                  return <div key={`epic-${item.key}-${i}`} className={`${item.color.light} border-b border-t border-gray-200`} style={{ height: `${EPIC_ROW_HEIGHT}px` }} />;
-                }
-                return (
-                  <div key={item.key} className="relative border-b border-gray-100" style={{ height: `${ROW_HEIGHT}px` }}>
-                    <GanttBar row={item} timelineStart={gantt.timelineStart} totalDays={gantt.totalDays} onHover={setHoveredRow} />
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-        {hoveredRow && (
-          <div className="absolute z-30 pointer-events-none" style={{ left: `${Math.min(mousePos.x + 12, (containerRef.current?.clientWidth || 800) - 280)}px`, top: `${mousePos.y + 12}px` }}>
-            <GanttTooltip row={hoveredRow} />
-          </div>
-        )}
       </div>
     </div>
   );
@@ -702,7 +583,6 @@ const DEFAULT_JQL = "project = TEAM ORDER BY status ASC, updated DESC";
 
 const TABS = [
   { id: "list", label: "Task List", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" },
-  { id: "gantt", label: "Gantt", icon: "M4 6h16M4 10h16M4 14h10M4 18h6" },
   { id: "calendar", label: "Calendar", icon: "M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" },
 ];
 
@@ -885,9 +765,39 @@ export default function PlanningPage() {
 
         {!loading && filteredIssues.length > 0 && (
           <>
+            <PlanningInsightsPanel issues={filteredIssues} />
+            {/* Sprint Planning AI Coach */}
+            <div className="mb-4">
+              <AiCoachPanel
+                context="Sprint Planning"
+                data={{ stats, issueCount: filteredIssues.length, scope }}
+                prompts={[
+                  {
+                    label: "Sprint Capacity Check",
+                    primary: true,
+                    question: "Analyze the planned sprint work. Based on the number of issues, their statuses, due dates, and assignments — can the team realistically complete this? Identify capacity risks, overloaded team members, and items that might need to be descoped.",
+                  },
+                  {
+                    label: "Sprint Goal Suggestion",
+                    question: "Based on the planned work items, suggest a clear, measurable sprint goal. The goal should reflect the most impactful deliverables and be achievable within the sprint.",
+                  },
+                  {
+                    label: "Risk Assessment",
+                    question: "Identify risks in the planned sprint: items without estimates, unassigned work, dependencies between items, items with no due date, and anything that could block progress. Suggest mitigations for each risk.",
+                  },
+                  {
+                    label: "Dependency Warnings",
+                    question: "Analyze the planned items for dependencies (blocking/blocked relationships, shared assignees, sequential work). Highlight potential bottlenecks and suggest ordering or parallelization strategies.",
+                  },
+                  {
+                    label: "Planning Completeness",
+                    question: "Audit the sprint plan for completeness: Are all items estimated? Assigned? Have acceptance criteria? Have due dates? What percentage of planned work meets Definition of Ready? What needs attention before sprint start?",
+                  },
+                ]}
+              />
+            </div>
             {tab === "calendar" && <CalendarView issues={filteredIssues} />}
             {tab === "list" && <TaskListView issues={filteredIssues} />}
-            {tab === "gantt" && <GanttView issues={filteredIssues} />}
           </>
         )}
 

@@ -26,6 +26,12 @@ export async function fetchEpicDetail(epicKey) {
   return res.json();
 }
 
+export async function fetchIssueDetail(issueKey) {
+  const res = await fetch(`${API_URL}/issue/${encodeURIComponent(issueKey)}`);
+  if (!res.ok) throw new Error("Failed to fetch issue details");
+  return res.json();
+}
+
 export async function fetchFilters() {
   const res = await fetch(`${API_URL}/filters`);
   if (!res.ok) throw new Error("Failed to fetch filters");
@@ -150,14 +156,18 @@ export async function fetchPiFollowUps() {
   return res.json();
 }
 
-export async function fetchProjectCompliance() {
-  const res = await fetch(`${API_URL}/compliance/projects`);
+export async function fetchProjectCompliance(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/compliance/projects?${params}`);
   if (!res.ok) throw new Error("Failed to fetch project compliance");
   return res.json();
 }
 
-export async function fetchPiCompliance() {
-  const res = await fetch(`${API_URL}/compliance/pi`);
+export async function fetchPiCompliance(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/compliance/pi?${params}`);
   if (!res.ok) throw new Error("Failed to fetch PI compliance");
   return res.json();
 }
@@ -195,5 +205,207 @@ export async function createBookmark(name, jql) {
 export async function deleteBookmark(id) {
   const res = await fetch(`${API_URL}/bookmarks/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error("Failed to delete bookmark");
+  return res.json();
+}
+
+// ─── Sprint & Velocity ──────────────────────────────────
+
+export async function fetchSprints() {
+  const res = await fetch(`${API_URL}/sprints`);
+  if (!res.ok) throw new Error("Failed to fetch sprints");
+  return res.json();
+}
+
+export async function fetchBurndown(sprintId, jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/sprints/${sprintId}/burndown?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch burndown");
+  return res.json();
+}
+
+export async function fetchVelocity(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/velocity?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch velocity");
+  return res.json();
+}
+
+// ─── Flow Metrics ────────────────────────────────────────
+
+export async function fetchCFD(jql, days) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  if (days) params.set("days", days);
+  const res = await fetch(`${API_URL}/flow/cfd?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch CFD");
+  return res.json();
+}
+
+export async function fetchCycleTime(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/flow/cycle-time?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch cycle time");
+  return res.json();
+}
+
+export async function fetchFlowMetrics(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/flow/metrics?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch flow metrics");
+  return res.json();
+}
+
+// ─── Standup ─────────────────────────────────────────────
+
+export async function fetchStandup(hours, jql) {
+  const params = new URLSearchParams();
+  if (hours) params.set("hours", hours);
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/standup?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch standup data");
+  return res.json();
+}
+
+// ─── Sprint Review ───────────────────────────────────────
+
+export async function fetchSprintReview(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/sprint-review?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch sprint review");
+  return res.json();
+}
+
+// ─── Definition of Ready ─────────────────────────────────
+
+export async function fetchDoR(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/dor?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch DoR");
+  return res.json();
+}
+
+// ─── ROAM Risk Board ─────────────────────────────────────
+
+export async function fetchRoamRisks() {
+  const res = await fetch(`${API_URL}/roam/risks`);
+  if (!res.ok) throw new Error("Failed to fetch risks");
+  return res.json();
+}
+
+export async function saveRoamRisk(risk) {
+  const res = await fetch(`${API_URL}/roam/risks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(risk),
+  });
+  if (!res.ok) throw new Error("Failed to save risk");
+  return res.json();
+}
+
+export async function deleteRoamRisk(id) {
+  const res = await fetch(`${API_URL}/roam/risks/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete risk");
+  return res.json();
+}
+
+// ─── Team Health Check ───────────────────────────────────
+
+export async function fetchHealthCheckSessions() {
+  const res = await fetch(`${API_URL}/health-check/sessions`);
+  if (!res.ok) throw new Error("Failed to fetch health check sessions");
+  return res.json();
+}
+
+export async function createHealthCheckSession(title) {
+  const res = await fetch(`${API_URL}/health-check/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error("Failed to create health check session");
+  return res.json();
+}
+
+export async function fetchHealthCheckSession(id) {
+  const res = await fetch(`${API_URL}/health-check/sessions/${id}`);
+  if (!res.ok) throw new Error("Failed to fetch health check session");
+  return res.json();
+}
+
+export async function voteHealthCheck(sessionId, vote) {
+  const res = await fetch(`${API_URL}/health-check/sessions/${sessionId}/vote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(vote),
+  });
+  if (!res.ok) throw new Error("Failed to vote");
+  return res.json();
+}
+
+export async function deleteHealthCheckSession(id) {
+  const res = await fetch(`${API_URL}/health-check/sessions/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete health check session");
+  return res.json();
+}
+
+// ─── Sprint Goals ────────────────────────────────────────
+
+export async function fetchSprintGoals() {
+  const res = await fetch(`${API_URL}/sprint-goals`);
+  if (!res.ok) throw new Error("Failed to fetch sprint goals");
+  return res.json();
+}
+
+export async function saveSprintGoals(goalSet) {
+  const res = await fetch(`${API_URL}/sprint-goals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(goalSet),
+  });
+  if (!res.ok) throw new Error("Failed to save sprint goals");
+  return res.json();
+}
+
+export async function deleteSprintGoals(id) {
+  const res = await fetch(`${API_URL}/sprint-goals/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete sprint goals");
+  return res.json();
+}
+
+// ─── AI Coach ────────────────────────────────────────────
+
+export async function askAiCoach(context, question, data) {
+  const res = await fetch(`${API_URL}/ai/coach`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ context, question, data }),
+  });
+  if (!res.ok) throw new Error("Failed to get AI coach response");
+  return res.json();
+}
+
+// ─── Dependencies ────────────────────────────────────────
+
+export async function fetchDependencies(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await fetch(`${API_URL}/dependencies?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch dependencies");
+  return res.json();
+}
+
+export async function discoverDependencies(projects) {
+  const res = await fetch(`${API_URL}/dependencies/discover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projects }),
+  });
+  if (!res.ok) throw new Error("Failed to discover dependencies");
   return res.json();
 }

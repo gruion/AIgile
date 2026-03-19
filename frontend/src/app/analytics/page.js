@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import JqlBar from "../../components/JqlBar";
 import IssueHoverCard from "../../components/IssueHoverCard";
+import AiCoachPanel from "../../components/AiCoachPanel";
 import { fetchAnalytics } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 
@@ -133,7 +134,6 @@ export default function AnalyticsPage() {
     { key: "cycle", label: "Cycle Time" },
     { key: "team", label: "Team Workload" },
     { key: "stale", label: "Stale Tickets" },
-    { key: "retro", label: "Retro Prompts" },
     { key: "dod", label: "Def. of Done" },
   ];
 
@@ -186,6 +186,31 @@ export default function AnalyticsPage() {
         {loading && (
           <div className="flex items-center justify-center py-12">
             <div className="animate-spin h-8 w-8 border-4 border-blue-200 border-t-blue-600 rounded-full" />
+          </div>
+        )}
+
+        {/* AI Coach */}
+        {data && (
+          <div className="mb-4">
+            <AiCoachPanel
+              context="Board Analytics Dashboard"
+              data={{
+                avgQuality: data.avgQuality,
+                qualityDistribution: data.qualityDistribution,
+                statusDistribution: data.statusDistribution,
+                wipCount: data.wipAging?.length,
+                staleCount: data.staleIssues?.length,
+                overdueCount: data.overdueIssues?.length,
+                bottlenecks: data.bottlenecks,
+                wipLimits: data.wipLimits,
+              }}
+              prompts={[
+                { label: "Board health", question: "Analyze the overall health of this board. What's working well and what needs attention?" },
+                { label: "WIP analysis", question: "Analyze the Work In Progress. Are there WIP limit violations? What should be done?" },
+                { label: "Quality improvement", question: "Based on the quality scores, what specific improvements should the team make?" },
+                { label: "Bottleneck fix", question: "Identify the biggest bottleneck and suggest a specific action plan to resolve it." },
+              ]}
+            />
           </div>
         )}
 
@@ -810,58 +835,6 @@ export default function AnalyticsPage() {
               </div>
             )}
 
-            {/* ═══ RETRO PROMPTS TAB ═══ */}
-            {activeTab === "retro" && (
-              <div className="space-y-6">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-base font-semibold text-gray-800">Retrospective Prompts</h2>
-                  <span className="text-xs text-gray-500">Auto-generated from board data</span>
-                </div>
-
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
-                  These discussion prompts are automatically generated based on patterns detected in your board data.
-                  Use them to facilitate data-driven retrospectives.
-                </div>
-
-                <div className="space-y-3">
-                  {(data.retroPrompts || []).map((prompt, i) => {
-                    const catColors = {
-                      process: { bg: "bg-purple-50", border: "border-purple-200", badge: "bg-purple-100 text-purple-700" },
-                      workflow: { bg: "bg-blue-50", border: "border-blue-200", badge: "bg-blue-100 text-blue-700" },
-                      workload: { bg: "bg-orange-50", border: "border-orange-200", badge: "bg-orange-100 text-orange-700" },
-                      planning: { bg: "bg-indigo-50", border: "border-indigo-200", badge: "bg-indigo-100 text-indigo-700" },
-                      prioritization: { bg: "bg-amber-50", border: "border-amber-200", badge: "bg-amber-100 text-amber-700" },
-                      ownership: { bg: "bg-red-50", border: "border-red-200", badge: "bg-red-100 text-red-700" },
-                      quality: { bg: "bg-pink-50", border: "border-pink-200", badge: "bg-pink-100 text-pink-700" },
-                      positive: { bg: "bg-green-50", border: "border-green-200", badge: "bg-green-100 text-green-700" },
-                      improvement: { bg: "bg-teal-50", border: "border-teal-200", badge: "bg-teal-100 text-teal-700" },
-                    };
-                    const colors = catColors[prompt.category] || catColors.process;
-
-                    return (
-                      <div key={i} className={`${colors.bg} border ${colors.border} rounded-xl p-5`}>
-                        <div className="flex items-start gap-3">
-                          <span className={`text-[10px] font-medium px-2 py-1 rounded ${colors.badge} uppercase shrink-0 mt-0.5`}>
-                            {prompt.category}
-                          </span>
-                          <div className="flex-1">
-                            <p className="text-sm text-gray-800 font-medium leading-relaxed">{prompt.question}</p>
-                            {prompt.context && (
-                              <p className="text-xs text-gray-500 mt-2">{prompt.context}</p>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {(!data.retroPrompts || data.retroPrompts.length === 0) && (
-                  <div className="text-center py-8 text-gray-400 text-sm">No retrospective prompts generated</div>
-                )}
-              </div>
-            )}
-
             {/* ═══ DEFINITION OF DONE TAB ═══ */}
             {activeTab === "dod" && (
               <div className="space-y-6">
@@ -937,6 +910,7 @@ export default function AnalyticsPage() {
             )}
           </>
         )}
+
       </main>
     </div>
   );
