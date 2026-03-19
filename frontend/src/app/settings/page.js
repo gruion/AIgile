@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Link from "next/link";
-import { fetchSettings, updateSettings } from "../../lib/api";
+import { fetchSettings, updateSettings, fetchConfig, updateConfig, fetchPiCompliance } from "../../lib/api";
+import { toast } from "../../components/Toaster";
 
 const EXAMPLE_TEMPLATES = [
   {
@@ -37,35 +37,93 @@ const EXAMPLE_TEMPLATES = [
   },
 ];
 
+const DEFAULT_MISSING_INFO = `A ticket is considered to have missing information if ANY of the following are true:
+- No description or description is less than 30 characters
+- No acceptance criteria (description does not contain "acceptance criteria", "AC:", "given/when/then", or a checklist)
+- No due date set
+- No assignee
+- No story points or time estimate`;
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState(null);
   const [template, setTemplate] = useState("");
+  const [missingInfoCriteria, setMissingInfoCriteria] = useState("");
+  const [promptSettings, setPromptSettings] = useState({
+    maxTickets: 100,
+    maxPromptChars: 40000,
+    includeDescriptions: true,
+    includeComments: true,
+    includeEstimates: true,
+    includeDoneTickets: false,
+    wipLimitPerPerson: 3,
+    wipLimitBoard: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
 
+  // Multi-server / team config
+  const [piConfig, setPiConfig] = useState({ name: "", startDate: "", endDate: "", sprintCount: 5, sprintDuration: 14, enabled: false });
+  const [teams, setTeams] = useState([]);
+  const [servers, setServers] = useState([]);
+  const [configSource, setConfigSource] = useState("");
+  const [programBoard, setProgramBoard] = useState({ projectKey: "", serverId: "primary" });
+  const [disabledPiChecks, setDisabledPiChecks] = useState([]);
+  const [allPiChecks, setAllPiChecks] = useState([]);
+  const [complianceResult, setComplianceResult] = useState(null);
+  const [verifying, setVerifying] = useState(false);
+
   useEffect(() => {
-    fetchSettings()
-      .then((s) => {
+    Promise.all([fetchSettings(), fetchConfig(), fetchPiCompliance().catch(() => null)])
+      .then(([s, cfg, piCompliance]) => {
         setSettings(s);
         setTemplate(s.epicChildrenJqlTemplate || "");
+        setMissingInfoCriteria(s.missingInfoCriteria || DEFAULT_MISSING_INFO);
+        if (s.promptSettings) setPromptSettings((prev) => ({ ...prev, ...s.promptSettings }));
+        if (cfg.piConfig) setPiConfig(cfg.piConfig);
+        if (cfg.teams) setTeams(cfg.teams);
+        if (cfg.servers) setServers(cfg.servers);
+        if (cfg.configSource) setConfigSource(cfg.configSource);
+        if (cfg.programBoard) setProgramBoard(cfg.programBoard);
+        if (cfg.disabledPiChecks) setDisabledPiChecks(cfg.disabledPiChecks);
+        if (piCompliance?.allCheckIds) setAllPiChecks(piCompliance.allCheckIds);
+        if (piCompliance) setComplianceResult(piCompliance);
       })
-      .catch((err) => setError(err.message))
+      .catch((err) => { setError(err.message); toast.error("Failed to load settings"); })
       .finally(() => setLoading(false));
   }, []);
+
+  const updatePromptField = (key, value) => {
+    setPromptSettings((prev) => ({ ...prev, [key]: value }));
+  };
 
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
     setError(null);
     try {
-      const result = await updateSettings({ epicChildrenJqlTemplate: template });
+      // Build server payloads: only send credentials if user typed new ones
+      const serverPayloads = servers.map((s) => ({
+        id: s.id, name: s.name, url: s.url, browserUrl: s.browserUrl || "",
+        projects: s.projects || [],
+        ...(s._username ? { username: s._username } : {}),
+        ...(s._token ? { token: s._token } : {}),
+      }));
+      const [result, cfgResult] = await Promise.all([
+        updateSettings({ epicChildrenJqlTemplate: template, missingInfoCriteria, promptSettings }),
+        updateConfig({ teams, piConfig, servers: serverPayloads, programBoard, disabledPiChecks }),
+      ]);
       setSettings((prev) => ({ ...prev, ...result }));
+      if (cfgResult.servers) setServers(cfgResult.servers);
+      if (cfgResult.piConfig) setPiConfig(cfgResult.piConfig);
+      if (cfgResult.configSource) setConfigSource(cfgResult.configSource);
       setSaved(true);
+      toast.success("Settings saved successfully");
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
       setError(err.message);
+      toast.error("Failed to save settings: " + err.message);
     }
     setSaving(false);
   };
@@ -78,44 +136,7 @@ export default function SettingsPage() {
     <div className="min-h-screen">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-[1400px] mx-auto px-4 py-3">
-          <div className="flex items-center gap-4">
-            <h1 className="text-lg font-bold text-gray-900">Jira Dashboard</h1>
-            <nav className="flex items-center gap-1 text-sm">
-              <Link
-                href="/"
-                className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-              >
-                Dashboard
-              </Link>
-              <Link
-                href="/insights"
-                className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-              >
-                Insights
-              </Link>
-              <Link
-                href="/gantt"
-                className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-              >
-                Gantt
-              </Link>
-              <Link
-                href="/analyze"
-                className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-              >
-                Analyze
-              </Link>
-              <Link
-                href="/analytics"
-                className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-              >
-                Analytics
-              </Link>
-              <span className="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm">
-                Settings
-              </span>
-            </nav>
-          </div>
+          <h1 className="text-lg font-bold text-gray-900">Settings</h1>
         </div>
       </header>
 
@@ -218,6 +239,568 @@ export default function SettingsPage() {
               </div>
             </div>
 
+            {/* Missing Info Criteria */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="text-sm font-semibold text-gray-800 mb-1">
+                Missing Info Audit Criteria
+              </h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Define what makes a ticket &quot;incomplete&quot; for the Analyze and Architecture pages.
+                This prompt is included in AI analysis to flag tickets with missing information.
+                Edit to match your team&apos;s definition of done.
+              </p>
+
+              {/* Quick presets */}
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                <button
+                  onClick={() => setMissingInfoCriteria(DEFAULT_MISSING_INFO)}
+                  className={`text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                    missingInfoCriteria === DEFAULT_MISSING_INFO
+                      ? "bg-blue-600 text-white border-blue-600"
+                      : "bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                  }`}
+                >
+                  Default (description + AC + due date)
+                </button>
+                <button
+                  onClick={() => setMissingInfoCriteria(`A ticket is considered to have missing information if ANY of the following are true:
+- No description or description is less than 30 characters
+- No due date set
+- No assignee`)}
+                  className="text-xs px-2.5 py-1.5 rounded-md border bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                >
+                  Minimal (description + due date + assignee)
+                </button>
+                <button
+                  onClick={() => setMissingInfoCriteria(`A ticket is considered to have missing information if ANY of the following are true:
+- No description or description is less than 50 characters
+- No acceptance criteria (description does not contain "acceptance criteria", "AC:", "given/when/then", or a checklist/bullet points)
+- No due date set
+- No assignee
+- No story points or time estimate
+- No labels or components assigned
+- No priority explicitly set (still on default "Medium")
+- Epic/Story type tickets have no linked child tasks`)}
+                  className="text-xs px-2.5 py-1.5 rounded-md border bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                >
+                  Strict (all fields)
+                </button>
+              </div>
+
+              <textarea
+                value={missingInfoCriteria}
+                onChange={(e) => setMissingInfoCriteria(e.target.value)}
+                rows={8}
+                className="w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 resize-y"
+              />
+              <p className="text-[10px] text-gray-400 mt-2">
+                This criteria is embedded into the AI prompts on the Analyze and Architecture pages.
+                Changes are saved together with the other settings.
+              </p>
+            </div>
+
+            {/* Prompt Control Settings */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="text-sm font-semibold text-gray-800 mb-1">
+                Prompt Control
+              </h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Control prompt size and cost for the Analyze and Architecture pages.
+                Limits prevent sending too many tokens to your AI provider.
+              </p>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Max tickets in prompt</label>
+                  <input
+                    type="number"
+                    min={10}
+                    max={500}
+                    value={promptSettings.maxTickets}
+                    onChange={(e) => updatePromptField("maxTickets", parseInt(e.target.value) || 100)}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                  />
+                  <p className="text-[10px] text-gray-400 mt-1">Prioritizes flagged, in-progress, and orphan tickets when trimming</p>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Max prompt size (chars)</label>
+                  <input
+                    type="number"
+                    min={5000}
+                    max={200000}
+                    step={5000}
+                    value={promptSettings.maxPromptChars}
+                    onChange={(e) => updatePromptField("maxPromptChars", parseInt(e.target.value) || 40000)}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                  />
+                  <p className="text-[10px] text-gray-400 mt-1">~4 chars per token. 40K chars ≈ 10K tokens</p>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-2">
+                <label className="text-xs text-gray-600 font-medium block">Fields to include in prompts</label>
+                {[
+                  { key: "includeDescriptions", label: "Descriptions", desc: "Ticket descriptions (biggest size impact)" },
+                  { key: "includeComments", label: "Last comments", desc: "Most recent comment per ticket" },
+                  { key: "includeEstimates", label: "Time estimates", desc: "Original estimate, time spent, remaining" },
+                  { key: "includeDoneTickets", label: "Done tickets", desc: "Include completed tickets (off = smaller prompt)" },
+                ].map((field) => (
+                  <label key={field.key} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={promptSettings[field.key]}
+                      onChange={(e) => updatePromptField(field.key, e.target.checked)}
+                      className="rounded border-gray-300"
+                    />
+                    <span className="text-xs text-gray-700">{field.label}</span>
+                    <span className="text-[10px] text-gray-400">— {field.desc}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* WIP Limits */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="text-sm font-semibold text-gray-800 mb-1">
+                WIP Limits
+              </h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Work-in-progress limits for the Analytics dashboard alerts.
+                Exceeding these triggers warnings in the team workload view.
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">WIP limit per person</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={promptSettings.wipLimitPerPerson}
+                    onChange={(e) => updatePromptField("wipLimitPerPerson", parseInt(e.target.value) || 3)}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                  />
+                  <p className="text-[10px] text-gray-400 mt-1">Recommended: 2-3 for most teams</p>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Board WIP limit (0 = auto)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={promptSettings.wipLimitBoard}
+                    onChange={(e) => updatePromptField("wipLimitBoard", parseInt(e.target.value) || 0)}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                  />
+                  <p className="text-[10px] text-gray-400 mt-1">0 = team_size x 2. Set manually to override.</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Config persistence status */}
+            {configSource && (
+              <div className={`rounded-lg border px-4 py-2.5 text-xs flex items-center justify-between ${
+                configSource === "file" ? "bg-green-50 border-green-200 text-green-700" : "bg-amber-50 border-amber-200 text-amber-700"
+              }`}>
+                <span>
+                  Config loaded from: <strong>{configSource}</strong>
+                  {configSource !== "file" && " — Changes will be saved to a persistent config file on next Save."}
+                </span>
+              </div>
+            )}
+
+            {/* Jira Servers */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-sm font-semibold text-gray-800">Jira Servers</h3>
+                <button
+                  onClick={() => setServers((s) => [...s, { id: `server-${Date.now()}`, name: "", url: "", browserUrl: "", projects: [], hasCredentials: false, _username: "", _token: "", _isNew: true }])}
+                  className="text-xs bg-blue-600 text-white px-2 py-1 rounded hover:bg-blue-700"
+                >
+                  + Add Server
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mb-4">
+                Configure Jira server connections. The API URL is used internally (e.g. Docker hostname).
+                The Browser URL is used for clickable ticket links (e.g. localhost or public domain).
+              </p>
+              <div className="space-y-3">
+                {servers.map((srv, idx) => {
+                  const referencedByTeams = teams.filter((t) => t.serverId === srv.id);
+                  return (
+                    <div key={srv.id} className="bg-gray-50 rounded-lg p-3 space-y-2 border border-gray-100">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] text-gray-500 uppercase tracking-wider">Server Name</label>
+                            <input
+                              type="text" value={srv.name} placeholder="My Jira"
+                              onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], name: e.target.value }; setServers(s); }}
+                              className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-gray-500 uppercase tracking-wider">Server ID</label>
+                            <input
+                              type="text" value={srv.id} disabled={!srv._isNew}
+                              onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], id: e.target.value.replace(/[^a-zA-Z0-9-_]/g, "") }; setServers(s); }}
+                              className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5 font-mono disabled:bg-gray-100 disabled:text-gray-400"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] text-gray-500 uppercase tracking-wider">API URL (internal)</label>
+                          <input
+                            type="text" value={srv.url || ""} placeholder="http://jira:8080"
+                            onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], url: e.target.value }; setServers(s); }}
+                            className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5 font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-gray-500 uppercase tracking-wider">Browser URL (external)</label>
+                          <input
+                            type="text" value={srv.browserUrl || ""} placeholder="http://localhost:9080"
+                            onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], browserUrl: e.target.value }; setServers(s); }}
+                            className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5 font-mono"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="text-[10px] text-gray-500 uppercase tracking-wider">Username / Email</label>
+                          <input
+                            type="text" value={srv._username ?? ""} placeholder={srv.hasCredentials ? "(unchanged)" : "admin"}
+                            onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], _username: e.target.value }; setServers(s); }}
+                            className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-gray-500 uppercase tracking-wider">API Token / Password</label>
+                          <input
+                            type="password" value={srv._token ?? ""} placeholder={srv.hasCredentials ? "••••••••" : "token"}
+                            onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], _token: e.target.value }; setServers(s); }}
+                            className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-gray-500 uppercase tracking-wider">Projects (comma-sep)</label>
+                          <input
+                            type="text" value={(srv.projects || []).join(", ")} placeholder="PROJ, TEAM"
+                            onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], projects: e.target.value.split(",").map((p) => p.trim()).filter(Boolean) }; setServers(s); }}
+                            className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5 font-mono"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between pt-1">
+                        <div className="flex items-center gap-2">
+                          {srv.hasCredentials && <span className="text-[10px] text-green-600 bg-green-50 px-1.5 py-0.5 rounded">Credentials set</span>}
+                          {srv._isNew && <span className="text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">New server</span>}
+                          {referencedByTeams.length > 0 && (
+                            <span className="text-[10px] text-gray-500">Used by: {referencedByTeams.map((t) => t.name).join(", ")}</span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (referencedByTeams.length > 0) { alert(`Cannot remove: used by ${referencedByTeams.map((t) => t.name).join(", ")}`); return; }
+                            setServers((s) => s.filter((_, i) => i !== idx));
+                          }}
+                          className="text-xs text-red-500 hover:text-red-700 px-2"
+                          title={referencedByTeams.length > 0 ? "Remove teams using this server first" : "Remove server"}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* PI Planning / Multi-Team Config */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="text-sm font-semibold text-gray-800 mb-1">
+                PI Planning Configuration
+              </h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Configure your Program Increment, teams, and program board.
+              </p>
+
+              {/* PI Config */}
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs text-gray-600 font-medium">Sprint Configuration</label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <span className="text-[10px] text-gray-400">{piConfig.enabled !== false ? "PI Sprint Mode" : "JQL-Only Mode"}</span>
+                  <div
+                    onClick={async () => {
+                      const newEnabled = piConfig.enabled === false ? true : false;
+                      const newPiConfig = { ...piConfig, enabled: newEnabled };
+                      setPiConfig(newPiConfig);
+                      try {
+                        const result = await updateConfig({ piConfig: newPiConfig });
+                        if (result.piConfig) setPiConfig(result.piConfig);
+                        if (result.configSource) setConfigSource(result.configSource);
+                        toast.success(newEnabled ? "PI Sprint Mode enabled" : "JQL-Only Mode enabled");
+                      } catch (err) {
+                        setPiConfig((p) => ({ ...p, enabled: !newEnabled }));
+                        toast.error("Failed to save mode: " + err.message);
+                      }
+                    }}
+                    className={`relative w-10 h-5 rounded-full transition-colors cursor-pointer ${piConfig.enabled !== false ? "bg-blue-600" : "bg-gray-300"}`}
+                  >
+                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${piConfig.enabled !== false ? "translate-x-5" : "translate-x-0.5"}`} />
+                  </div>
+                </label>
+              </div>
+              {piConfig.enabled === false && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 text-xs text-amber-700 mb-3">
+                  Sprint configuration disabled. Teams will be analyzed using their JQL queries without PI date filtering.
+                </div>
+              )}
+              <div className={`grid grid-cols-4 gap-3 mb-6 transition-opacity ${piConfig.enabled === false ? "opacity-40 pointer-events-none" : ""}`}>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">PI Name</label>
+                  <input
+                    type="text" value={piConfig.name || ""}
+                    onChange={(e) => setPiConfig((p) => ({ ...p, name: e.target.value }))}
+                    placeholder="PI 2026-Q1"
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Start Date</label>
+                  <input
+                    type="date" value={piConfig.startDate || ""}
+                    onChange={(e) => setPiConfig((p) => ({ ...p, startDate: e.target.value }))}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">End Date</label>
+                  <input
+                    type="date" value={piConfig.endDate || ""}
+                    onChange={(e) => setPiConfig((p) => ({ ...p, endDate: e.target.value }))}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Sprints / Duration (days)</label>
+                  <div className="flex gap-2 mt-1">
+                    <input
+                      type="number" value={piConfig.sprintCount || 5} min={1} max={20}
+                      onChange={(e) => setPiConfig((p) => ({ ...p, sprintCount: parseInt(e.target.value) }))}
+                      className="w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                    />
+                    <input
+                      type="number" value={piConfig.sprintDuration || 14} min={7} max={30}
+                      onChange={(e) => setPiConfig((p) => ({ ...p, sprintDuration: parseInt(e.target.value) }))}
+                      className="w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Program Board */}
+              <div className="grid grid-cols-2 gap-3 mb-6">
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Program Board Project Key</label>
+                  <input
+                    type="text" value={programBoard.projectKey || ""} placeholder="PROGRAM"
+                    onChange={(e) => setProgramBoard((p) => ({ ...p, projectKey: e.target.value.toUpperCase() }))}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 font-mono"
+                  />
+                  <p className="text-[10px] text-gray-400 mt-1">The parent project with high-level Features that link to team work</p>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Program Board Server</label>
+                  <select
+                    value={programBoard.serverId || "primary"}
+                    onChange={(e) => setProgramBoard((p) => ({ ...p, serverId: e.target.value }))}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                  >
+                    {servers.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Teams */}
+              <div className="mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-medium text-gray-600">Teams</label>
+                  <button
+                    onClick={() => setTeams((t) => [...t, { id: `team-${Date.now()}`, name: "", serverId: servers[0]?.id || "primary", projectKey: "", boardId: null, color: "#6366F1", jql: "" }])}
+                    className="text-xs bg-blue-600 text-white px-2 py-1 rounded hover:bg-blue-700"
+                  >
+                    + Add Team
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {teams.map((team, idx) => (
+                    <div key={team.id} className="bg-gray-50 rounded-lg p-2 space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color" value={team.color || "#3B82F6"}
+                          onChange={(e) => { const t = [...teams]; t[idx] = { ...t[idx], color: e.target.value }; setTeams(t); }}
+                          className="w-8 h-8 rounded border-0 cursor-pointer shrink-0"
+                        />
+                        <input
+                          type="text" value={team.name} placeholder="Team Name"
+                          onChange={(e) => { const t = [...teams]; t[idx] = { ...t[idx], name: e.target.value }; setTeams(t); }}
+                          className="flex-1 text-sm bg-white border border-gray-200 rounded px-2 py-1"
+                        />
+                        <input
+                          type="text" value={team.projectKey} placeholder="PROJECT_KEY"
+                          onChange={(e) => { const t = [...teams]; t[idx] = { ...t[idx], projectKey: e.target.value.toUpperCase() }; setTeams(t); }}
+                          className="w-28 text-sm bg-white border border-gray-200 rounded px-2 py-1 font-mono"
+                        />
+                        <select
+                          value={team.serverId}
+                          onChange={(e) => { const t = [...teams]; t[idx] = { ...t[idx], serverId: e.target.value }; setTeams(t); }}
+                          className="text-xs bg-white border border-gray-200 rounded px-2 py-1"
+                        >
+                          {servers.map((s) => (
+                            <option key={s.id} value={s.id}>{s.name}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => setTeams((t) => t.filter((_, i) => i !== idx))}
+                          className="text-xs text-red-500 hover:text-red-700 px-2 shrink-0"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      <input
+                        type="text" value={team.jql || ""} placeholder="Custom JQL (optional) — e.g. project = KEY AND sprint in openSprints()"
+                        onChange={(e) => { const t = [...teams]; t[idx] = { ...t[idx], jql: e.target.value }; setTeams(t); }}
+                        className="w-full text-xs bg-white border border-gray-200 rounded px-2 py-1 font-mono text-gray-600"
+                      />
+                    </div>
+                  ))}
+                  {teams.length === 0 && (
+                    <p className="text-xs text-gray-400 text-center py-3">No teams configured. Add a team to use PI Planning.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* PI Compliance Checks */}
+            {allPiChecks.length > 0 && (
+              <div className="bg-white rounded-xl border border-gray-200 p-6">
+                <div className="flex items-center justify-between mb-1">
+                  <h3 className="text-sm font-semibold text-gray-800">PI Compliance Checks</h3>
+                  <button
+                    onClick={async () => {
+                      setVerifying(true);
+                      try {
+                        await updateConfig({ disabledPiChecks });
+                        const result = await fetchPiCompliance();
+                        setComplianceResult(result);
+                        if (result.allCheckIds) setAllPiChecks(result.allCheckIds);
+                        toast.success(`Compliance score: ${result.score}% (${result.checks?.length || 0} active checks)`);
+                      } catch (err) {
+                        toast.error("Failed to verify compliance: " + err.message);
+                      }
+                      setVerifying(false);
+                    }}
+                    disabled={verifying}
+                    className="text-xs bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white px-3 py-1.5 rounded-md transition-colors"
+                  >
+                    {verifying ? "Verifying..." : "Reload & Verify"}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mb-4">
+                  Disable checks to exclude them from the PI compliance score.
+                </p>
+
+                {/* Compliance score summary */}
+                {complianceResult && (
+                  <div className={`rounded-lg border px-4 py-3 mb-4 ${
+                    complianceResult.score >= 80 ? "bg-green-50 border-green-200" :
+                    complianceResult.score >= 50 ? "bg-amber-50 border-amber-200" :
+                    "bg-red-50 border-red-200"
+                  }`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={`text-sm font-bold ${
+                        complianceResult.score >= 80 ? "text-green-700" :
+                        complianceResult.score >= 50 ? "text-amber-700" :
+                        "text-red-700"
+                      }`}>
+                        Compliance Score: {complianceResult.score}%
+                      </span>
+                      <span className="text-[10px] text-gray-400">
+                        {complianceResult.totalScore}/{complianceResult.maxPossible} points
+                        {" · "}{complianceResult.totalIssues} issues · {complianceResult.teamCount} teams
+                      </span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                      <div
+                        className={`h-2 rounded-full transition-all ${
+                          complianceResult.score >= 80 ? "bg-green-500" :
+                          complianceResult.score >= 50 ? "bg-amber-500" :
+                          "bg-red-500"
+                        }`}
+                        style={{ width: `${complianceResult.score}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Check results (after verify) */}
+                {complianceResult?.checks && (
+                  <div className="space-y-1.5 mb-4">
+                    {complianceResult.checks.map((check) => (
+                      <div key={check.id} className={`flex items-center justify-between text-xs px-3 py-2 rounded-lg border ${
+                        check.score >= 8 ? "bg-green-50 border-green-200" :
+                        check.score >= 5 ? "bg-amber-50 border-amber-200" :
+                        "bg-red-50 border-red-200"
+                      }`}>
+                        <span className="text-gray-700">{check.name}</span>
+                        <div className="flex items-center gap-2">
+                          {check.detail && <span className="text-[10px] text-gray-400 max-w-[300px] truncate">{check.detail}</span>}
+                          <span className={`font-bold ${
+                            check.score >= 8 ? "text-green-600" :
+                            check.score >= 5 ? "text-amber-600" :
+                            "text-red-600"
+                          }`}>{check.score}/{check.maxScore}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Checkboxes to enable/disable checks */}
+                <div className="grid grid-cols-2 gap-1.5">
+                  {allPiChecks.map((check) => {
+                    const isDisabled = disabledPiChecks.includes(check.id);
+                    return (
+                      <label key={check.id} className={`flex items-center gap-2 text-xs px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
+                        isDisabled ? "bg-gray-50 border-gray-200 text-gray-400" : "bg-green-50 border-green-200 text-gray-700"
+                      }`}>
+                        <input
+                          type="checkbox"
+                          checked={!isDisabled}
+                          onChange={() => {
+                            setDisabledPiChecks((prev) =>
+                              isDisabled
+                                ? prev.filter((id) => id !== check.id)
+                                : [...prev, check.id]
+                            );
+                          }}
+                          className="rounded border-gray-300"
+                        />
+                        {check.name}
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-gray-400 mt-3">
+                  Toggle checks on/off, then click "Reload & Verify" to save and re-score compliance against live Jira data.
+                </p>
+              </div>
+            )}
+
             {/* Help */}
             <div className="bg-amber-50 rounded-xl border border-amber-200 p-6">
               <h3 className="text-sm font-semibold text-amber-800 mb-2">
@@ -245,6 +828,27 @@ export default function SettingsPage() {
           </>
         )}
       </main>
+
+      {/* Sticky Save Bar */}
+      {!loading && settings && (
+        <div className="sticky bottom-0 bg-white border-t border-gray-200 py-3 z-10">
+          <div className="max-w-[900px] mx-auto px-4 flex items-center gap-3">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="text-sm bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-6 py-2 rounded-lg transition-colors font-medium"
+            >
+              {saving ? "Saving..." : "Save All Settings"}
+            </button>
+            {saved && (
+              <span className="text-sm text-green-600 font-medium">Saved!</span>
+            )}
+            {error && (
+              <span className="text-sm text-red-600">{error}</span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

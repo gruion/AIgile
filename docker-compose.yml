@@ -93,11 +93,15 @@ services:
       - .env
     environment:
       - JIRA_BASE_URL=http://jira:8080
+      - JIRA_BROWSER_URL=${NEXT_PUBLIC_JIRA_BASE_URL:-http://localhost:9080}
       - HASURA_GRAPHQL_URL=http://hasura:8080/v1/graphql
       - HASURA_ADMIN_SECRET=${HASURA_ADMIN_SECRET}
       - JIRA_PROJECT_KEY=${JIRA_PROJECT_KEY:-TEAM}
       - AI_PROVIDER=${AI_PROVIDER:-mock}
       - API_PORT=3001
+      - CONFIG_DIR=/data
+    volumes:
+      - dashboard-config:/data
     depends_on:
       - hasura
     networks:
@@ -125,6 +129,7 @@ volumes:
   jira-data:
   jira-db-data:
   hasura-db-data:
+  dashboard-config:
 
 networks:
   jira-net:

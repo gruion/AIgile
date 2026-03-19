@@ -2,7 +2,12 @@
 
 import { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
+import JqlBar from "../../components/JqlBar";
+import IssueHoverCard from "../../components/IssueHoverCard";
 import { fetchIssues } from "../../lib/api";
+import { toast } from "../../components/Toaster";
+
+const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
 
 // ─── Color palette for epics ────────────────────────────
 
@@ -97,18 +102,13 @@ function computeGanttData(epics, noEpic) {
       if (end <= start) end = addDays(start, 1);
 
       rows.push({
-        key: issue.key,
-        summary: issue.summary,
+        ...issue,
         assignee: issue.assigneeName,
-        status: issue.status,
-        statusCategory: issue.statusCategory,
-        priority: issue.priority,
         epicKey: group.key,
         epicName: group.name,
         color: colorMap[group.key],
         start: startOfDay(start),
         end: startOfDay(end),
-        dueDate: issue.dueDate,
         urgencyFlags: issue.urgencyFlags || [],
       });
     }
@@ -283,8 +283,10 @@ export default function GanttPage() {
       try {
         const result = await fetchIssues(jql);
         setData(result);
+        toast.success("Gantt data loaded");
       } catch (err) {
         setError(err.message);
+        toast.error("Failed to load Gantt data");
       }
       setLoading(false);
     }
@@ -345,29 +347,14 @@ export default function GanttPage() {
       <header className="bg-white border-b border-gray-200 sticky top-0 z-20">
         <div className="max-w-[1600px] mx-auto px-4 py-3">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-4">
-              <h1 className="text-lg font-bold text-gray-900">Gantt View</h1>
-              <nav className="flex items-center gap-1 text-sm">
-                <Link href="/" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Dashboard</Link>
-                <Link href="/insights" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Insights</Link>
-                <span className="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm">Gantt</span>
-                <Link href="/analyze" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Analyze</Link>
-                <Link href="/analytics" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Analytics</Link>
-                <Link href="/settings" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Settings</Link>
-              </nav>
-            </div>
+            <h1 className="text-lg font-bold text-gray-900">Gantt Chart</h1>
           </div>
 
-          <form onSubmit={handleSearch} className="flex gap-2">
-            <input
-              type="text"
-              value={inputJql}
-              onChange={(e) => setInputJql(e.target.value)}
-              placeholder="Enter JQL query..."
-              className="flex-1 text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 font-mono"
-            />
-            <button type="submit" className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg">Search</button>
-          </form>
+          <JqlBar
+            value={inputJql}
+            onChange={setInputJql}
+            onSubmit={(q) => setJql(q)}
+          />
 
           {/* Epic legend / toggles */}
           {gantt && Object.keys(gantt.colorMap).length > 0 && (
@@ -443,7 +430,9 @@ export default function GanttPage() {
                       className="flex items-center gap-2 px-3 border-b border-gray-100 hover:bg-gray-50"
                       style={{ height: `${ROW_HEIGHT}px` }}
                     >
-                      <span className="text-[10px] font-mono text-blue-600 w-16 shrink-0">{item.key}</span>
+                      <IssueHoverCard issue={item} jiraBaseUrl={JIRA_BASE_URL}>
+                        <a href={`${JIRA_BASE_URL}/browse/${item.key}`} target="_blank" rel="noopener noreferrer" className="text-[10px] font-mono text-blue-600 w-16 shrink-0 hover:underline">{item.key}</a>
+                      </IssueHoverCard>
                       <span className="text-xs text-gray-700 truncate flex-1">{item.summary}</span>
                       <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${
                         item.statusCategory === "done" ? "bg-green-100 text-green-700"

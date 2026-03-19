@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import Link from "next/link";
 import StatsBar from "../components/StatsBar";
 import EpicCard from "../components/EpicCard";
 import IssueRow from "../components/IssueRow";
 import FilterBar from "../components/FilterBar";
+import JqlBar from "../components/JqlBar";
 import { fetchIssues } from "../lib/api";
+import { toast } from "../components/Toaster";
 
 const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
 const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
@@ -26,8 +27,10 @@ export default function Home() {
     try {
       const result = await fetchIssues(query);
       setData(result);
+      toast.success(`Loaded ${result.total} issues`);
     } catch (err) {
       setError(err.message);
+      toast.error("Failed to load issues: " + err.message);
     }
     setLoading(false);
   }, []);
@@ -75,48 +78,11 @@ export default function Home() {
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-[1400px] mx-auto px-4 py-3">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-4">
-              <h1 className="text-lg font-bold text-gray-900">Jira Dashboard</h1>
-              <nav className="flex items-center gap-1 text-sm">
-                <span className="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm">
-                  Dashboard
-                </span>
-                <Link
-                  href="/insights"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Insights
-                </Link>
-                <Link
-                  href="/gantt"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Gantt
-                </Link>
-                <Link
-                  href="/analyze"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Analyze
-                </Link>
-                <Link
-                  href="/analytics"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Analytics
-                </Link>
-                <Link
-                  href="/settings"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Settings
-                </Link>
-              </nav>
+            <h1 className="text-lg font-bold text-gray-900">Dashboard</h1>
+            <div className="flex items-center gap-2">
               {data && (
                 <span className="text-xs text-gray-400">{data.total} issues</span>
               )}
-            </div>
-            <div className="flex items-center gap-2">
               <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
                 <input
                   type="checkbox"
@@ -144,21 +110,11 @@ export default function Home() {
           </div>
 
           {/* JQL Search */}
-          <form onSubmit={handleSearch} className="flex gap-2">
-            <input
-              type="text"
-              value={inputJql}
-              onChange={(e) => setInputJql(e.target.value)}
-              placeholder="Enter JQL query..."
-              className="flex-1 text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 font-mono"
-            />
-            <button
-              type="submit"
-              className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg"
-            >
-              Search
-            </button>
-          </form>
+          <JqlBar
+            value={inputJql}
+            onChange={setInputJql}
+            onSubmit={(q) => setJql(q)}
+          />
 
           {/* Jira saved filters / boards */}
           <div className="mt-3">

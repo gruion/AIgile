@@ -4,6 +4,10 @@ import { useState, useEffect, useMemo } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { fetchEpicDetail } from "../../../lib/api";
+import ResizableTable from "../../../components/ResizableTable";
+import IssueHoverCard from "../../../components/IssueHoverCard";
+
+const JIRA_BASE_URL = process.env.NEXT_PUBLIC_JIRA_BASE_URL || "http://localhost:9080";
 
 // ─── Prompt builder (asks AI to return structured JSON) ──
 
@@ -240,56 +244,96 @@ function EpicSummaryCard({ data }) {
   );
 }
 
+const TICKET_SORT_FN = (a, b, key) => {
+  if (key === "ticket") return (a.key || "").localeCompare(b.key || "");
+  if (key === "assignee") return (a.assignee || "zzz").localeCompare(b.assignee || "zzz");
+  if (key === "status") {
+    const order = { Done: 2, "In Progress": 1 };
+    return (order[a.status] ?? 0) - (order[b.status] ?? 0);
+  }
+  if (key === "health") {
+    const order = { blocked: 0, at_risk: 1, needs_attention: 2, on_track: 3 };
+    return (order[a.health] ?? 3) - (order[b.health] ?? 3);
+  }
+  if (key === "progress") return (a.progress_pct || 0) - (b.progress_pct || 0);
+  if (key === "lastUpdate") return (a.days_since_update || 0) - (b.days_since_update || 0);
+  if (key === "blocked") return (a.days_blocked || 0) - (b.days_blocked || 0);
+  return String(a[key] || "").localeCompare(String(b[key] || ""));
+};
+
+const TICKET_TABLE_COLUMNS = [
+  {
+    key: "ticket", label: "Ticket", sortable: true, defaultWidth: 200, minWidth: 120,
+    render: (row) => (
+      <div>
+        <IssueHoverCard issue={{
+          ...row,
+          assigneeName: row.assignee,
+          statusCategory: row.status === "Done" ? "done" : row.status === "In Progress" ? "indeterminate" : "new",
+        }} jiraBaseUrl={JIRA_BASE_URL}>
+          <a href={`${JIRA_BASE_URL}/browse/${row.key}`} target="_blank" rel="noopener noreferrer" className="font-bold text-blue-700 hover:underline">{row.key}</a>
+        </IssueHoverCard>
+        <div className="text-gray-600 truncate">{row.summary}</div>
+      </div>
+    ),
+  },
+  {
+    key: "assignee", label: "Assignee", sortable: true, defaultWidth: 110, minWidth: 80,
+    className: "text-gray-700",
+    render: (row) => row.assignee || "—",
+  },
+  {
+    key: "status", label: "Status", sortable: true, defaultWidth: 100, minWidth: 70,
+    render: (row) => (
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+        row.status === "Done" ? "bg-green-100 text-green-800"
+        : row.status === "In Progress" ? "bg-blue-100 text-blue-800"
+        : "bg-gray-100 text-gray-700"
+      }`}>{row.status}</span>
+    ),
+  },
+  {
+    key: "health", label: "Health", sortable: true, defaultWidth: 90, minWidth: 70,
+    render: (row) => <HealthBadge health={row.health} />,
+  },
+  {
+    key: "progress", label: "Progress", sortable: true, defaultWidth: 100, minWidth: 70,
+    render: (row) => <MiniProgress pct={row.progress_pct || 0} />,
+  },
+  {
+    key: "lastUpdate", label: "Last Update", sortable: true, defaultWidth: 90, minWidth: 70,
+    className: "text-gray-500",
+    render: (row) => `${row.days_since_update}d ago`,
+  },
+  {
+    key: "blocked", label: "Blocked", sortable: true, defaultWidth: 70, minWidth: 50,
+    render: (row) => row.days_blocked > 0 ? (
+      <span className="text-red-700 font-medium">{row.days_blocked}d</span>
+    ) : (
+      <span className="text-gray-400">—</span>
+    ),
+  },
+  {
+    key: "nextAction", label: "Next Action", sortable: false, defaultWidth: 200, minWidth: 100,
+    className: "text-gray-700 truncate",
+    render: (row) => row.next_action || "—",
+  },
+];
+
 function TicketTable({ tickets }) {
   return (
-    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      <table className="w-full text-xs">
-        <thead>
-          <tr className="bg-gray-50 border-b border-gray-200">
-            <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px]">Ticket</th>
-            <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px]">Assignee</th>
-            <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px]">Status</th>
-            <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px]">Health</th>
-            <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px]">Progress</th>
-            <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px] hidden lg:table-cell">Last Update</th>
-            <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px] hidden lg:table-cell">Blocked</th>
-            <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px]">Next Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tickets.map((t, i) => {
-            const s = HEALTH_STYLES[t.health] || HEALTH_STYLES.on_track;
-            return (
-              <tr key={i} className={`border-b border-gray-100 ${s.bg} hover:brightness-95 transition-all`}>
-                <td className="px-3 py-2.5">
-                  <div className="font-bold text-blue-700">{t.key}</div>
-                  <div className="text-gray-600 truncate max-w-[200px]">{t.summary}</div>
-                </td>
-                <td className="px-3 py-2.5 text-gray-700">{t.assignee || "—"}</td>
-                <td className="px-3 py-2.5">
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                    t.status === "Done" ? "bg-green-100 text-green-800"
-                    : t.status === "In Progress" ? "bg-blue-100 text-blue-800"
-                    : "bg-gray-100 text-gray-700"
-                  }`}>{t.status}</span>
-                </td>
-                <td className="px-3 py-2.5"><HealthBadge health={t.health} /></td>
-                <td className="px-3 py-2.5"><MiniProgress pct={t.progress_pct || 0} /></td>
-                <td className="px-3 py-2.5 text-gray-500 hidden lg:table-cell">{t.days_since_update}d ago</td>
-                <td className="px-3 py-2.5 hidden lg:table-cell">
-                  {t.days_blocked > 0 ? (
-                    <span className="text-red-700 font-medium">{t.days_blocked}d</span>
-                  ) : (
-                    <span className="text-gray-400">—</span>
-                  )}
-                </td>
-                <td className="px-3 py-2.5 text-gray-700 max-w-[200px] truncate">{t.next_action || "—"}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <ResizableTable
+      columns={TICKET_TABLE_COLUMNS}
+      data={tickets}
+      getRowKey={(row, i) => row.key || i}
+      rowClassName={(row) => {
+        const s = HEALTH_STYLES[row.health] || HEALTH_STYLES.on_track;
+        return `${s.bg} hover:brightness-95 transition-all`;
+      }}
+      defaultSort={{ key: "health", dir: "asc" }}
+      sortFn={TICKET_SORT_FN}
+      emptyMessage="No tickets"
+    />
   );
 }
 
@@ -600,14 +644,6 @@ export default function EpicDetailPage() {
                   {data?.epic?.summary && <span className="font-normal text-gray-500 ml-2">— {data.epic.summary}</span>}
                 </h1>
               </div>
-              <nav className="flex items-center gap-1 text-sm">
-                <Link href="/" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Dashboard</Link>
-                <Link href="/insights" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Insights</Link>
-                <Link href="/gantt" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Gantt</Link>
-                <Link href="/analyze" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Analyze</Link>
-                <Link href="/analytics" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Analytics</Link>
-                <Link href="/settings" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Settings</Link>
-              </nav>
             </div>
           </div>
 

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import UrgencyBadge from "./UrgencyBadge";
+import IssueHoverCard from "./IssueHoverCard";
 
 const STATUS_COLORS = {
   new: "bg-gray-200 text-gray-700",
@@ -35,14 +36,16 @@ export default function IssueRow({ issue, jiraBaseUrl }) {
     <div className="border-b border-gray-100 last:border-b-0">
       <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-gray-50/50 transition-colors">
         {/* Key + Type */}
-        <a
-          href={jiraUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-xs font-mono text-blue-600 hover:underline w-20 shrink-0"
-        >
-          {issue.key}
-        </a>
+        <IssueHoverCard issue={issue} jiraBaseUrl={jiraBaseUrl}>
+          <a
+            href={jiraUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs font-mono text-blue-600 hover:underline w-20 shrink-0"
+          >
+            {issue.key}
+          </a>
+        </IssueHoverCard>
 
         {/* Summary */}
         <p className="flex-1 text-sm text-gray-800 truncate min-w-0">

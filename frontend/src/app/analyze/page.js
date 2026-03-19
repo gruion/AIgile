@@ -1,15 +1,18 @@
 "use client";
 
 import { useState, useCallback, useEffect, useMemo } from "react";
-import Link from "next/link";
 import FilterBar from "../../components/FilterBar";
-import { fetchIssues } from "../../lib/api";
+import JqlBar from "../../components/JqlBar";
+import ResizableTable from "../../components/ResizableTable";
+import { fetchIssues, fetchSettings } from "../../lib/api";
+import { selectTicketsForPrompt, formatTicketForPrompt, trimPrompt } from "../../lib/prompt-utils";
+import { toast } from "../../components/Toaster";
 
 const DEFAULT_JQL = process.env.NEXT_PUBLIC_DEFAULT_JQL || "project = TEAM ORDER BY status ASC, updated DESC";
 
 // ─── Prompt builder: board-wide scrum/kanban analysis ───
 
-function buildAnalysisPrompt(data) {
+function buildAnalysisPrompt(data, missingInfoCriteria, promptSettings = {}) {
   const today = new Date().toISOString().split("T")[0];
   const lines = [];
 
@@ -40,30 +43,23 @@ function buildAnalysisPrompt(data) {
     }
   }
 
-  // ─── All tickets detail
-  lines.push("## All Tickets");
+  // ─── All tickets detail (smart selection)
   const allIssues = [
     ...(data.epics || []).flatMap((e) => e.issues.map((i) => ({ ...i, epicKey: e.key, epicName: e.name }))),
     ...(data.noEpic || []).map((i) => ({ ...i, epicKey: null, epicName: "No Epic" })),
   ];
 
-  for (const t of allIssues) {
+  const { selected, stats: selStats } = selectTicketsForPrompt(allIssues, promptSettings);
+
+  if (selStats.excluded > 0) {
+    lines.push(`## Tickets (${selStats.included} of ${selStats.total} — ${selStats.excluded} lower-priority tickets excluded to stay within budget)`);
+  } else {
+    lines.push("## All Tickets");
+  }
+
+  for (const t of selected) {
     lines.push("");
-    lines.push(`### ${t.key} — ${t.summary}`);
-    lines.push(`- Epic: ${t.epicName || "None"}`);
-    lines.push(`- Status: ${t.status} (${t.statusCategory}) | Priority: ${t.priority || "Medium"} | Type: ${t.issueType || "Task"}`);
-    lines.push(`- Assignee: ${t.assigneeName || "UNASSIGNED"}`);
-    if (t.dueDate) lines.push(`- Due: ${t.dueDate}`);
-    if (t.labels?.length) lines.push(`- Labels: ${t.labels.join(", ")}`);
-    lines.push(`- Created: ${t.created ? new Date(t.created).toISOString().split("T")[0] : "—"}`);
-    lines.push(`- Last updated: ${t.updated ? new Date(t.updated).toISOString().split("T")[0] : "—"} (${t.daysSinceUpdate}d ago)`);
-    if (t.originalEstimate || t.timeSpent) {
-      lines.push(`- Time: est ${t.originalEstimate || "—"}, spent ${t.timeSpent || "—"}, remaining ${t.remainingEstimate || "—"}`);
-    }
-    if (t.urgencyFlags?.length) lines.push(`- FLAGS: ${t.urgencyFlags.map((f) => `${f.label} [${f.severity}]`).join(", ")}`);
-    if (t.lastComment) {
-      lines.push(`- Last comment (${t.lastComment.date ? new Date(t.lastComment.date).toISOString().split("T")[0] : "—"}) by ${t.lastComment.author}: ${t.lastComment.body || ""}`);
-    }
+    lines.push(formatTicketForPrompt(t, promptSettings));
     lines.push(`- Comment count: ${t.commentCount}`);
   }
 
@@ -203,7 +199,12 @@ function buildAnalysisPrompt(data) {
   lines.push("Rules:");
   lines.push("- critical_actions MUST be sorted by priority (1 = most critical). Include ALL issues found, not just top 3.");
   lines.push("- message_template should be professional, specific, and ready to paste — include ticket keys and what you need from them.");
-  lines.push("- missing_info_audit: check EVERY ticket. If a ticket has no description, no due date, no estimate, etc. — flag it.");
+  lines.push("- missing_info_audit: check EVERY ticket against these criteria:");
+  if (missingInfoCriteria) {
+    lines.push(missingInfoCriteria);
+  } else {
+    lines.push("  If a ticket has no description, no acceptance criteria, no due date, no estimate — flag it.");
+  }
   lines.push("- For WIP: recommended max per person is 2-3. Board-wide recommended max is team_size * 2.");
   lines.push("- stale_tickets: include ALL tickets not updated in 7+ days that are not Done.");
   lines.push("- contact_message should be ready-to-send and empathetic but specific about what you need.");
@@ -396,39 +397,57 @@ function AnalysisReport({ report }) {
 
       {/* Missing Info Audit */}
       {expandedSection === "missing" && report.missing_info_audit?.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
-                <th className="text-left px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase">Ticket</th>
-                <th className="text-left px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase">Assignee</th>
-                <th className="text-left px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase">Missing</th>
-                <th className="text-left px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase">Severity</th>
-                <th className="text-left px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {report.missing_info_audit.map((item, i) => (
-                <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="px-3 py-2">
-                    <span className="font-bold text-blue-700">{item.ticket_key}</span>
-                    <p className="text-gray-500 truncate max-w-[180px]">{item.ticket_summary}</p>
-                  </td>
-                  <td className="px-3 py-2 text-gray-700">{item.assignee || "—"}</td>
-                  <td className="px-3 py-2">
-                    <div className="flex flex-wrap gap-1">
-                      {item.missing?.map((m) => (
-                        <span key={m} className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">{m}</span>
-                      ))}
-                    </div>
-                  </td>
-                  <td className="px-3 py-2"><SeverityBadge severity={item.severity} /></td>
-                  <td className="px-3 py-2 text-gray-700 max-w-[200px]">{item.action}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ResizableTable
+          columns={[
+            {
+              key: "ticket", label: "Ticket", sortable: true, defaultWidth: 200, minWidth: 120,
+              render: (row) => (
+                <div>
+                  <span className="font-bold text-blue-700">{row.ticket_key}</span>
+                  <p className="text-gray-500 truncate">{row.ticket_summary}</p>
+                </div>
+              ),
+            },
+            {
+              key: "assignee", label: "Assignee", sortable: true, defaultWidth: 110, minWidth: 80,
+              className: "text-gray-700",
+              render: (row) => row.assignee || "—",
+            },
+            {
+              key: "missing", label: "Missing", sortable: true, defaultWidth: 180, minWidth: 100,
+              render: (row) => (
+                <div className="flex flex-wrap gap-1">
+                  {row.missing?.map((m) => (
+                    <span key={m} className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">{m}</span>
+                  ))}
+                </div>
+              ),
+            },
+            {
+              key: "severity", label: "Severity", sortable: true, defaultWidth: 100, minWidth: 70,
+              render: (row) => <SeverityBadge severity={row.severity} />,
+            },
+            {
+              key: "action", label: "Action", sortable: false, defaultWidth: 200, minWidth: 100,
+              className: "text-gray-700",
+              render: (row) => row.action,
+            },
+          ]}
+          data={report.missing_info_audit}
+          getRowKey={(row, i) => row.ticket_key || i}
+          sortFn={(a, b, key) => {
+            if (key === "ticket") return (a.ticket_key || "").localeCompare(b.ticket_key || "");
+            if (key === "assignee") return (a.assignee || "zzz").localeCompare(b.assignee || "zzz");
+            if (key === "missing") return (a.missing?.length || 0) - (b.missing?.length || 0);
+            if (key === "severity") {
+              const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+              return (order[a.severity] ?? 4) - (order[b.severity] ?? 4);
+            }
+            return 0;
+          }}
+          defaultSort={{ key: "severity", dir: "asc" }}
+          emptyMessage="No missing info found"
+        />
       )}
 
       {/* WIP Analysis */}
@@ -687,6 +706,26 @@ export default function AnalyzePage() {
   const [pasteText, setPasteText] = useState("");
   const [report, setReport] = useState(null);
   const [parseError, setParseError] = useState(null);
+  const [missingInfoCriteria, setMissingInfoCriteria] = useState("");
+  const [promptSettings, setPromptSettings] = useState({
+    maxTickets: 100,
+    maxPromptChars: 40000,
+    includeDescriptions: true,
+    includeComments: true,
+    includeEstimates: true,
+    includeDoneTickets: false,
+  });
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+
+  useEffect(() => {
+    fetchSettings()
+      .then((s) => {
+        setMissingInfoCriteria(s.missingInfoCriteria || "");
+        if (s.promptSettings) setPromptSettings((prev) => ({ ...prev, ...s.promptSettings }));
+        setSettingsLoaded(true);
+      })
+      .catch(() => {});
+  }, []);
 
   const loadData = useCallback(async (query) => {
     setLoading(true);
@@ -694,8 +733,10 @@ export default function AnalyzePage() {
     try {
       const result = await fetchIssues(query);
       setData(result);
+      toast.success(`Loaded ${result.total} issues for analysis`);
     } catch (err) {
       setError(err.message);
+      toast.error("Failed to load issues: " + err.message);
     }
     setLoading(false);
   }, []);
@@ -716,10 +757,47 @@ export default function AnalyzePage() {
     } catch {}
   }, []);
 
-  const prompt = useMemo(() => {
-    if (!data) return "";
-    return buildAnalysisPrompt(data);
-  }, [data]);
+  const { prompt, promptStats } = useMemo(() => {
+    if (!data) return { prompt: "", promptStats: null };
+    const rawPrompt = buildAnalysisPrompt(data, missingInfoCriteria, promptSettings);
+    const { prompt: finalPrompt, trimmed, charCount } = trimPrompt(rawPrompt, promptSettings.maxPromptChars);
+    return {
+      prompt: finalPrompt,
+      promptStats: { charCount, trimmed, approxTokens: Math.round(charCount / 4) },
+    };
+  }, [data, missingInfoCriteria, promptSettings]);
+
+  const promptWarnings = useMemo(() => {
+    if (!data || !promptStats) return [];
+    const warnings = [];
+    // Compute ticket selection stats
+    const allIssues = [
+      ...(data.epics || []).flatMap((e) => e.issues.map((i) => ({ ...i, epicKey: e.key }))),
+      ...(data.noEpic || []).map((i) => ({ ...i, epicKey: null })),
+    ];
+    const doneCount = allIssues.filter((t) => t.statusCategory === "done").length;
+    const { stats: selStats } = selectTicketsForPrompt(allIssues, promptSettings);
+
+    if (promptStats.trimmed) {
+      warnings.push({ level: "critical", msg: `Prompt was trimmed to fit the ${promptSettings.maxPromptChars.toLocaleString()} char limit. Some ticket data was cut off. Increase "Max prompt chars" in Settings.` });
+    }
+    if (selStats.excluded > 0) {
+      warnings.push({ level: "warning", msg: `${selStats.excluded} tickets excluded (limit: ${promptSettings.maxTickets}). The AI won't see these. Increase "Max tickets" in Settings if needed.` });
+    }
+    if (!promptSettings.includeDoneTickets && doneCount > 10) {
+      warnings.push({ level: "info", msg: `${doneCount} done tickets excluded (only 10 sampled). Enable "Done tickets" in Settings for full cycle-time analysis.` });
+    }
+    if (!promptSettings.includeDescriptions) {
+      warnings.push({ level: "warning", msg: `Descriptions are turned off. The AI will lack context about what each ticket is about. Enable in Settings > Prompt Control.` });
+    }
+    if (!promptSettings.includeComments) {
+      warnings.push({ level: "info", msg: `Comments are turned off. The AI won't see discussion context. Enable in Settings > Prompt Control.` });
+    }
+    if (!settingsLoaded) {
+      warnings.push({ level: "info", msg: `Using default prompt settings. Configure them in Settings > Prompt Control for better results.` });
+    }
+    return warnings;
+  }, [data, promptStats, promptSettings, settingsLoaded]);
 
   const handleSearch = (e) => {
     e.preventDefault();
@@ -748,8 +826,10 @@ export default function AnalyzePage() {
       setReport(parsed);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
       setTab("report");
+      toast.success("AI analysis complete");
     } catch (err) {
       setParseError(`Invalid JSON: ${err.message}`);
+      toast.error("AI analysis failed");
     }
   };
 
@@ -766,32 +846,17 @@ export default function AnalyzePage() {
         <div className="max-w-[1400px] mx-auto px-4 py-3">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-4">
-              <h1 className="text-lg font-bold text-gray-900">Board Analysis</h1>
-              <nav className="flex items-center gap-1 text-sm">
-                <Link href="/" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Dashboard</Link>
-                <Link href="/insights" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Insights</Link>
-                <Link href="/gantt" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Gantt</Link>
-                <span className="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm">Analyze</span>
-                <Link href="/analytics" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Analytics</Link>
-                <Link href="/settings" className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors">Settings</Link>
-              </nav>
+              <h1 className="text-lg font-bold text-gray-900">Deep Analysis</h1>
               {data && <span className="text-xs text-gray-400">{data.total} issues loaded</span>}
             </div>
           </div>
 
           {/* JQL */}
-          <form onSubmit={handleSearch} className="flex gap-2">
-            <input
-              type="text"
-              value={inputJql}
-              onChange={(e) => setInputJql(e.target.value)}
-              placeholder="Enter JQL query..."
-              className="flex-1 text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 font-mono"
-            />
-            <button type="submit" className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg">
-              Load Issues
-            </button>
-          </form>
+          <JqlBar
+            value={inputJql}
+            onChange={setInputJql}
+            onSubmit={(q) => setJql(q)}
+          />
 
           {/* Jira saved filters */}
           <div className="mt-2">
@@ -871,11 +936,30 @@ export default function AnalyzePage() {
                   Copy it and paste into your corporate AI chatbot. The AI will return a comprehensive board analysis as JSON.
                 </div>
 
+                {promptWarnings.length > 0 && (
+                  <div className="space-y-1.5">
+                    {promptWarnings.map((w, i) => (
+                      <div key={i} className={`rounded-lg px-4 py-2.5 text-xs flex items-start gap-2 ${
+                        w.level === "critical" ? "bg-red-50 border border-red-200 text-red-700" :
+                        w.level === "warning" ? "bg-amber-50 border border-amber-200 text-amber-700" :
+                        "bg-gray-50 border border-gray-200 text-gray-600"
+                      }`}>
+                        <span className="shrink-0 mt-0.5">{w.level === "critical" ? "\u26A0" : w.level === "warning" ? "\u26A0" : "\u2139"}</span>
+                        <span>{w.msg}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div className="bg-gray-900 rounded-xl border border-gray-700 overflow-hidden">
                   <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-700">
                     <div className="flex items-center gap-3">
                       <span className="text-xs font-medium text-gray-300">Board Analysis Prompt</span>
                       <span className="text-[10px] text-gray-500">{prompt.length.toLocaleString()} chars</span>
+                      <span className="text-[10px] text-gray-500">~{Math.ceil(prompt.length / 4).toLocaleString()} tokens</span>
+                      {promptStats?.trimmed && (
+                        <span className="text-[10px] text-amber-500 font-medium">trimmed</span>
+                      )}
                     </div>
                     <button
                       onClick={() => handleCopy(prompt)}

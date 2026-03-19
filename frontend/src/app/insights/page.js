@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Link from "next/link";
 import { fetchInsightsSummaries, fetchBoardSummary } from "../../lib/api";
 
 const RISK_COLORS = {
@@ -167,44 +166,7 @@ export default function InsightsPage() {
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-[1400px] mx-auto px-4 py-3">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <h1 className="text-lg font-bold text-gray-900">AI Insights</h1>
-              <nav className="flex items-center gap-1 text-sm">
-                <Link
-                  href="/"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Dashboard
-                </Link>
-                <span className="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm">
-                  Insights
-                </span>
-                <Link
-                  href="/gantt"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Gantt
-                </Link>
-                <Link
-                  href="/analyze"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Analyze
-                </Link>
-                <Link
-                  href="/analytics"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Analytics
-                </Link>
-                <Link
-                  href="/settings"
-                  className="px-3 py-1.5 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-                >
-                  Settings
-                </Link>
-              </nav>
-            </div>
+            <h1 className="text-lg font-bold text-gray-900">AI Insights</h1>
             <button
               onClick={() => window.location.reload()}
               className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 rounded-md"

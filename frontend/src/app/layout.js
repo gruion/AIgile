@@ -1,4 +1,6 @@
 import "./globals.css";
+import Sidebar from "../components/Sidebar";
+import Toaster from "../components/Toaster";
 
 export const metadata = {
   title: "Jira AI Dashboard",
@@ -8,7 +10,13 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body className="bg-gray-50">
+        <Sidebar />
+        <div className="min-h-screen" id="main-content">
+          {children}
+        </div>
+        <Toaster />
+      </body>
     </html>
   );
 }

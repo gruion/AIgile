@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "seed": "node seed.js"
+    "seed": "node seed.js",
+    "seed:multi": "node seed-multi.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
