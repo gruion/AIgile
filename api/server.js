@@ -4580,7 +4580,7 @@ Respond with ONLY valid JSON (no markdown, no backticks):
 });
 
 // ─── Start ───────────────────────────────────────────────
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`Dashboard API running on port ${PORT}`);
   console.log(`Config loaded from: ${configSource}`);
   console.log(`Jira: ${defaultServer().url}`);
@@ -4588,3 +4588,17 @@ app.listen(PORT, async () => {
   console.log(`Servers: ${JIRA_SERVERS.map((s) => s.name).join(", ")}`);
   await detectEpicFields();
 });
+
+// Graceful shutdown (fixes Ctrl+C not killing on Windows)
+function shutdown() {
+  console.log("\nShutting down...");
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 3000);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+if (process.platform === "win32") {
+  const rl = await import("readline");
+  const i = rl.createInterface({ input: process.stdin, output: process.stdout });
+  i.on("close", shutdown);
+}
