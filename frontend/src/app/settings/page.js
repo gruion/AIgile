@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { fetchSettings, updateSettings, fetchConfig, updateConfig, fetchPiCompliance } from "../../lib/api";
+import { fetchSettings, updateSettings, fetchConfig, updateConfig, fetchPiCompliance, testConnection } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 
 const EXAMPLE_TEMPLATES = [
@@ -413,15 +413,14 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between mb-1">
                 <h3 className="text-sm font-semibold text-gray-800">Jira Servers</h3>
                 <button
-                  onClick={() => setServers((s) => [...s, { id: `server-${Date.now()}`, name: "", url: "", browserUrl: "", projects: [], hasCredentials: false, _username: "", _token: "", _isNew: true }])}
+                  onClick={() => setServers((s) => [...s, { id: `server-${Date.now()}`, name: "", url: "", browserUrl: "", projects: [], hasCredentials: false, _username: "", _token: "", _isNew: true, _showAdvanced: false }])}
                   className="text-xs bg-blue-600 text-white px-2 py-1 rounded hover:bg-blue-700"
                 >
                   + Add Server
                 </button>
               </div>
               <p className="text-xs text-gray-500 mb-4">
-                Configure Jira server connections. The API URL is used internally (e.g. Docker hostname).
-                The Browser URL is used for clickable ticket links (e.g. localhost or public domain).
+                Configure Jira server connections. Use "Test Connection" to verify before saving.
               </p>
               <div className="space-y-3">
                 {servers.map((srv, idx) => {
@@ -448,25 +447,35 @@ export default function SettingsPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="text-[10px] text-gray-500 uppercase tracking-wider">API URL (internal)</label>
-                          <input
-                            type="text" value={srv.url || ""} placeholder="http://jira:8080"
-                            onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], url: e.target.value }; setServers(s); }}
-                            className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5 font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-gray-500 uppercase tracking-wider">Browser URL (external)</label>
-                          <input
-                            type="text" value={srv.browserUrl || ""} placeholder="http://localhost:9080"
-                            onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], browserUrl: e.target.value }; setServers(s); }}
-                            className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5 font-mono"
-                          />
-                        </div>
+                      <div>
+                        <label className="text-[10px] text-gray-500 uppercase tracking-wider">Jira URL</label>
+                        <input
+                          type="text" value={srv.url || ""} placeholder="https://jira.example.com"
+                          onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], url: e.target.value }; setServers(s); }}
+                          className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5 font-mono"
+                        />
+                        <p className="text-[10px] text-gray-400 mt-0.5">The URL used to reach Jira from the API server (and browser, unless overridden below)</p>
                       </div>
-                      <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() => { const s = [...servers]; s[idx] = { ...s[idx], _showAdvanced: !s[idx]._showAdvanced }; setServers(s); }}
+                          className="text-[10px] text-blue-600 hover:text-blue-800"
+                        >
+                          {srv._showAdvanced ? "- Hide advanced" : "+ Browser URL override (advanced)"}
+                        </button>
+                        {srv._showAdvanced && (
+                          <div className="mt-1">
+                            <input
+                              type="text" value={srv.browserUrl || ""} placeholder="Leave empty to use Jira URL above"
+                              onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], browserUrl: e.target.value }; setServers(s); }}
+                              className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 font-mono"
+                            />
+                            <p className="text-[10px] text-gray-400 mt-0.5">Only needed if the API reaches Jira on a different URL than the browser (e.g. Docker internal hostname vs public URL)</p>
+                          </div>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
                         <div>
                           <label className="text-[10px] text-gray-500 uppercase tracking-wider">Username / Email</label>
                           <input
@@ -483,33 +492,69 @@ export default function SettingsPage() {
                             className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5"
                           />
                         </div>
-                        <div>
-                          <label className="text-[10px] text-gray-500 uppercase tracking-wider">Projects (comma-sep)</label>
-                          <input
-                            type="text" value={(srv.projects || []).join(", ")} placeholder="PROJ, TEAM"
-                            onChange={(e) => { const s = [...servers]; s[idx] = { ...s[idx], projects: e.target.value.split(",").map((p) => p.trim()).filter(Boolean) }; setServers(s); }}
-                            className="w-full text-sm bg-white border border-gray-200 rounded px-2 py-1 mt-0.5 font-mono"
-                          />
-                        </div>
                       </div>
+                      {/* Test result banner */}
+                      {srv._testResult && (
+                        <div className={`rounded-lg px-3 py-2 text-xs flex items-center gap-2 ${
+                          srv._testResult.ok
+                            ? "bg-green-50 border border-green-200 text-green-700"
+                            : "bg-red-50 border border-red-200 text-red-700"
+                        }`}>
+                          {srv._testResult.ok
+                            ? <>Connected as <strong>{srv._testResult.displayName}</strong>{srv._testResult.emailAddress ? ` (${srv._testResult.emailAddress})` : ""}</>
+                            : <>{srv._testResult.error}</>
+                          }
+                        </div>
+                      )}
                       <div className="flex items-center justify-between pt-1">
                         <div className="flex items-center gap-2">
-                          {srv.hasCredentials && <span className="text-[10px] text-green-600 bg-green-50 px-1.5 py-0.5 rounded">Credentials set</span>}
+                          {srv.hasCredentials && !srv._testResult && <span className="text-[10px] text-green-600 bg-green-50 px-1.5 py-0.5 rounded">Credentials set</span>}
                           {srv._isNew && <span className="text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">New server</span>}
                           {referencedByTeams.length > 0 && (
                             <span className="text-[10px] text-gray-500">Used by: {referencedByTeams.map((t) => t.name).join(", ")}</span>
                           )}
                         </div>
-                        <button
-                          onClick={() => {
-                            if (referencedByTeams.length > 0) { alert(`Cannot remove: used by ${referencedByTeams.map((t) => t.name).join(", ")}`); return; }
-                            setServers((s) => s.filter((_, i) => i !== idx));
-                          }}
-                          className="text-xs text-red-500 hover:text-red-700 px-2"
-                          title={referencedByTeams.length > 0 ? "Remove teams using this server first" : "Remove server"}
-                        >
-                          Remove
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={async () => {
+                              const url = srv.url;
+                              const username = srv._username || "";
+                              const token = srv._token || "";
+                              if (!url) { toast.error("Enter a Jira URL first"); return; }
+                              if (!username && !srv.hasCredentials) { toast.error("Enter a username"); return; }
+                              if (!token && !srv.hasCredentials) { toast.error("Enter an API token"); return; }
+                              const s = [...servers]; s[idx] = { ...s[idx], _testing: true, _testResult: null }; setServers(s);
+                              try {
+                                const result = await testConnection({
+                                  url,
+                                  username: username || "__use_saved__",
+                                  token: token || "__use_saved__",
+                                  serverId: srv.id,
+                                });
+                                const s2 = [...servers]; s2[idx] = { ...s2[idx], _testing: false, _testResult: result }; setServers(s2);
+                                if (result.ok) toast.success(`Connected as ${result.displayName}`);
+                                else toast.error(result.error);
+                              } catch (err) {
+                                const s2 = [...servers]; s2[idx] = { ...s2[idx], _testing: false, _testResult: { ok: false, error: err.message } }; setServers(s2);
+                                toast.error(err.message);
+                              }
+                            }}
+                            disabled={srv._testing}
+                            className="text-xs text-blue-600 hover:text-blue-800 border border-blue-200 bg-blue-50 px-2 py-0.5 rounded disabled:opacity-50"
+                          >
+                            {srv._testing ? "Testing..." : "Test Connection"}
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (referencedByTeams.length > 0) { alert(`Cannot remove: used by ${referencedByTeams.map((t) => t.name).join(", ")}`); return; }
+                              setServers((s) => s.filter((_, i) => i !== idx));
+                            }}
+                            className="text-xs text-red-500 hover:text-red-700 px-2"
+                            title={referencedByTeams.length > 0 ? "Remove teams using this server first" : "Remove server"}
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );

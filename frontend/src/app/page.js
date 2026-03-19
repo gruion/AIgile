@@ -162,8 +162,8 @@ export default function Home() {
           <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
             <strong>Error:</strong> {error}
             <p className="text-xs text-red-500 mt-1">
-              Make sure Jira is running at {JIRA_BASE_URL} and the API credentials
-              are configured in .env
+              Check your Jira server connection in{" "}
+              <a href="/settings" className="text-red-700 underline font-medium">Settings</a>.
             </p>
           </div>
         )}

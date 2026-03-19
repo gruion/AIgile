@@ -1,6 +1,7 @@
 import "./globals.css";
 import Sidebar from "../components/Sidebar";
 import Toaster from "../components/Toaster";
+import SetupGuard from "../components/SetupGuard";
 
 export const metadata = {
   title: "AIgileCoach",
@@ -13,6 +14,7 @@ export default function RootLayout({ children }) {
       <body className="bg-gray-50">
         <Sidebar />
         <div className="min-h-screen" id="main-content">
+          <SetupGuard />
           {children}
         </div>
         <Toaster />

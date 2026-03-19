@@ -1,6 +1,12 @@
 # ============================================================
 # AIgileCoach — GKE Manifests (Lite — external Jira)
-# HTTPRoute: http://AIgileCoach.hpr.dev.intranet.groupebpce.net
+# Jira connection configured from Settings UI, no .env needed
+#
+# Build images:
+#   docker build -t aigilecoach-api -f api/Dockerfile .
+#   docker build -t aigilecoach-frontend \
+#     --build-arg NEXT_PUBLIC_API_URL=http://aigilecoach-api.example.com \
+#     ./frontend
 # ============================================================
 
 # ─── Namespace ───────────────────────────────────────────────
@@ -10,37 +16,6 @@ metadata:
   name: aigilecoach
   labels:
     app.kubernetes.io/part-of: aigilecoach
-
----
-# ─── Secrets ─────────────────────────────────────────────────
-apiVersion: v1
-kind: Secret
-metadata:
-  name: aigilecoach-secrets
-  namespace: aigilecoach
-  labels:
-    app.kubernetes.io/part-of: aigilecoach
-type: Opaque
-stringData:
-  JIRA_EMAIL: ""
-  JIRA_API_TOKEN: ""
-
----
-# ─── ConfigMap ───────────────────────────────────────────────
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: aigilecoach-config
-  namespace: aigilecoach
-  labels:
-    app.kubernetes.io/part-of: aigilecoach
-data:
-  JIRA_BASE_URL: "https://your-jira-instance.atlassian.net"
-  JIRA_BROWSER_URL: "https://your-jira-instance.atlassian.net"
-  JIRA_PROJECT_KEY: "TEAM"
-  API_PORT: "3001"
-  AI_PROVIDER: "mock"
-  CONFIG_DIR: "/data"
 
 ---
 # ─── PVC for API config persistence ─────────────────────────
@@ -86,38 +61,8 @@ spec:
           ports:
             - containerPort: 3001
           env:
-            - name: JIRA_BASE_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: aigilecoach-config
-                  key: JIRA_BASE_URL
-            - name: JIRA_BROWSER_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: aigilecoach-config
-                  key: JIRA_BROWSER_URL
-            - name: JIRA_PROJECT_KEY
-              valueFrom:
-                configMapKeyRef:
-                  name: aigilecoach-config
-                  key: JIRA_PROJECT_KEY
-            - name: JIRA_EMAIL
-              valueFrom:
-                secretKeyRef:
-                  name: aigilecoach-secrets
-                  key: JIRA_EMAIL
-            - name: JIRA_API_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: aigilecoach-secrets
-                  key: JIRA_API_TOKEN
             - name: API_PORT
               value: "3001"
-            - name: AI_PROVIDER
-              valueFrom:
-                configMapKeyRef:
-                  name: aigilecoach-config
-                  key: AI_PROVIDER
             - name: CONFIG_DIR
               value: "/data"
           volumeMounts:
@@ -132,13 +77,13 @@ spec:
               memory: 512Mi
           readinessProbe:
             httpGet:
-              path: /config
+              path: /config/status
               port: 3001
             initialDelaySeconds: 10
             periodSeconds: 5
           livenessProbe:
             httpGet:
-              path: /config
+              path: /config/status
               port: 3001
             initialDelaySeconds: 15
             periodSeconds: 10
@@ -190,9 +135,6 @@ spec:
           image: aigilecoach-frontend:latest
           ports:
             - containerPort: 3000
-          env:
-            - name: NEXT_PUBLIC_API_URL
-              value: "http://aigilecoach-api:3001"
           resources:
             requests:
               cpu: 100m
@@ -230,7 +172,7 @@ spec:
 
 ---
 # ═════════════════════════════════════════════════════════════
-# Gateway + HTTPRoute (Gateway API)
+# Gateway + HTTPRoutes (Gateway API)
 # ═════════════════════════════════════════════════════════════
 
 apiVersion: gateway.networking.k8s.io/v1
@@ -251,6 +193,7 @@ spec:
           from: Same
 
 ---
+# Frontend route (main UI)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -264,7 +207,7 @@ spec:
     - name: aigilecoach-gateway
       namespace: aigilecoach
   hostnames:
-    - "AIgileCoach.hpr.dev.intranet.groupebpce.net"
+    - "aigilecoach.example.com"
   rules:
     - matches:
         - path:
@@ -273,3 +216,28 @@ spec:
       backendRefs:
         - name: aigilecoach-frontend
           port: 3000
+
+---
+# API route (browser needs direct access for fetch calls)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: aigilecoach-api
+  namespace: aigilecoach
+  labels:
+    app: api
+    app.kubernetes.io/part-of: aigilecoach
+spec:
+  parentRefs:
+    - name: aigilecoach-gateway
+      namespace: aigilecoach
+  hostnames:
+    - "aigilecoach-api.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: aigilecoach-api
+          port: 3001

@@ -92,23 +92,31 @@ if (fileConfig) {
 }
 
 // Tier 3: defaults if still empty
-if (JIRA_SERVERS.length === 0) {
+// Only create default server if env vars provide actual credentials
+if (JIRA_SERVERS.length === 0 && JIRA_API_TOKEN) {
   JIRA_SERVERS.push({
     id: "primary", name: "Primary Jira", url: JIRA_BASE_URL,
     username: JIRA_USERNAME, token: JIRA_API_TOKEN,
     projects: [JIRA_PROJECT_KEY], browserUrl: "",
   });
 }
-if (TEAMS.length === 0) {
+if (TEAMS.length === 0 && JIRA_SERVERS.length > 0) {
   TEAMS.push({
-    id: "default", name: "Default Team", serverId: "primary",
-    projectKey: JIRA_PROJECT_KEY, boardId: null, color: "#3B82F6",
+    id: "default", name: "Default Team", serverId: JIRA_SERVERS[0].id,
+    projectKey: JIRA_SERVERS[0].projects?.[0] || "TEAM", boardId: null, color: "#3B82F6",
   });
+}
+
+// Check if app needs initial setup
+function needsSetup() {
+  return JIRA_SERVERS.length === 0 || JIRA_SERVERS.every((s) => !s.token);
 }
 
 // Helper: get server config by id
 function getServer(serverId) {
-  return JIRA_SERVERS.find((s) => s.id === serverId) || JIRA_SERVERS[0];
+  const server = JIRA_SERVERS.find((s) => s.id === serverId) || JIRA_SERVERS[0];
+  if (!server) throw new Error("No Jira server configured. Go to Settings to add one.");
+  return server;
 }
 
 // Helper: strip ORDER BY clause from user-provided JQL before AND-ing
@@ -246,18 +254,69 @@ function getEpicName(fields) {
   return null;
 }
 
-// ─── Helpers ─────────────────────────────────────────────
-const jiraHeaders = () => ({
-  Authorization:
-    "Basic " +
-    Buffer.from(`${JIRA_USERNAME}:${JIRA_API_TOKEN}`).toString("base64"),
-  "Content-Type": "application/json",
-  Accept: "application/json",
+// ─── Helpers (resolve server by id, fall back to first configured or env vars) ────
+function resolveServer(serverId) {
+  if (serverId) {
+    const found = JIRA_SERVERS.find((s) => s.id === serverId);
+    if (found) return found;
+  }
+  if (JIRA_SERVERS.length > 0) return JIRA_SERVERS[0];
+  return { url: JIRA_BASE_URL, username: JIRA_USERNAME, token: JIRA_API_TOKEN, name: "default" };
+}
+function defaultServer() { return resolveServer(); }
+
+// Resolve server from project key by checking which team owns it
+function resolveServerForProject(projectKey) {
+  if (!projectKey) return defaultServer();
+  const team = TEAMS.find((t) => t.projectKey === projectKey);
+  if (team) return resolveServer(team.serverId);
+  // Check server project lists
+  const server = JIRA_SERVERS.find((s) => s.projects?.includes(projectKey));
+  if (server) return server;
+  return defaultServer();
+}
+
+// Extract project key from JQL (best-effort)
+function extractProjectFromJql(jql) {
+  if (!jql) return null;
+  const match = jql.match(/project\s*=\s*"?([A-Z][A-Z0-9_-]+)"?/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+// Resolve server from serverId query param, or from JQL project key
+function resolveServerFromReq(req) {
+  if (req.query.serverId) return resolveServer(req.query.serverId);
+  const project = extractProjectFromJql(req.query.jql) || req.query.project;
+  if (project) return resolveServerForProject(project);
+  return defaultServer();
+}
+
+// Middleware: auto-resolve serverId from JQL project key if not explicitly set
+app.use((req, res, next) => {
+  if (!req.query.serverId) {
+    const server = resolveServerFromReq(req);
+    if (server.id) req.query.serverId = server.id;
+  }
+  next();
 });
 
-async function jiraFetch(path) {
-  const url = `${JIRA_BASE_URL}/rest/api/2${path}`;
-  const res = await fetch(url, { headers: jiraHeaders() });
+// Helper: build enriched error response with server & JQL context
+function errorResponse(req, err) {
+  const server = resolveServerFromReq(req);
+  return {
+    error: err.message,
+    server: server.name || server.url || "unknown",
+    serverUrl: server.url || null,
+    jql: req.query.jql || null,
+  };
+}
+
+const jiraHeaders = () => jiraHeadersFor(defaultServer());
+
+async function jiraFetch(path, serverId) {
+  const srv = resolveServer(serverId);
+  const url = `${srv.url}/rest/api/2${path}`;
+  const res = await fetch(url, { headers: jiraHeadersFor(srv) });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Jira API ${res.status}: ${text}`);
@@ -265,9 +324,10 @@ async function jiraFetch(path) {
   return res.json();
 }
 
-async function jiraFetchAgile(path) {
-  const url = `${JIRA_BASE_URL}/rest/agile/1.0${path}`;
-  const res = await fetch(url, { headers: jiraHeaders() });
+async function jiraFetchAgile(path, serverId) {
+  const srv = resolveServer(serverId);
+  const url = `${srv.url}/rest/agile/1.0${path}`;
+  const res = await fetch(url, { headers: jiraHeadersFor(srv) });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Jira Agile API ${res.status}: ${text}`);
@@ -276,7 +336,7 @@ async function jiraFetchAgile(path) {
 }
 
 // Paginated search — fetches ALL matching issues, not just one page
-async function jiraSearchAll(jql, fieldsStr, pageSize = 100, expand = "") {
+async function jiraSearchAll(jql, fieldsStr, pageSize = 100, expand = "", serverId = null) {
   let startAt = 0;
   let allIssues = [];
   let total = 0;
@@ -284,7 +344,8 @@ async function jiraSearchAll(jql, fieldsStr, pageSize = 100, expand = "") {
   do {
     const expandParam = expand ? `&expand=${expand}` : "";
     const data = await jiraFetch(
-      `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}${expandParam}`
+      `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}${expandParam}`,
+      serverId
     );
     total = data.total;
     allIssues = allIssues.concat(data.issues);
@@ -409,7 +470,7 @@ app.get("/filters", async (req, res) => {
 
     // 1. User's favourite/starred filters
     try {
-      const favFilters = await jiraFetch("/filter/favourite");
+      const favFilters = await jiraFetch("/filter/favourite", req.query.serverId);
       results.favourite = favFilters.map((f) => ({
         id: f.id,
         name: f.name,
@@ -423,7 +484,7 @@ app.get("/filters", async (req, res) => {
 
     // 2. Boards (Kanban + Scrum) the user can see
     try {
-      const boardData = await jiraFetchAgile("/board?maxResults=50");
+      const boardData = await jiraFetchAgile("/board?maxResults=50", req.query.serverId);
       for (const board of boardData.values || []) {
         const entry = {
           id: board.id,
@@ -434,9 +495,9 @@ app.get("/filters", async (req, res) => {
         };
         // Fetch the board's filter to get its JQL
         try {
-          const boardConfig = await jiraFetchAgile(`/board/${board.id}/configuration`);
+          const boardConfig = await jiraFetchAgile(`/board/${board.id}/configuration`, req.query.serverId);
           if (boardConfig.filter?.id) {
-            const boardFilter = await jiraFetch(`/filter/${boardConfig.filter.id}`);
+            const boardFilter = await jiraFetch(`/filter/${boardConfig.filter.id}`, req.query.serverId);
             entry.jql = boardFilter.jql;
             entry.filterName = boardFilter.name;
           }
@@ -451,7 +512,7 @@ app.get("/filters", async (req, res) => {
 
     // 3. Recent filters (not favourites)
     try {
-      const myFilters = await jiraFetch("/filter/search?maxResults=20&orderBy=IS_FAVOURITE&expand=jql");
+      const myFilters = await jiraFetch("/filter/search?maxResults=20&orderBy=IS_FAVOURITE&expand=jql", req.query.serverId);
       results.recent = (myFilters.values || [])
         .filter((f) => !results.favourite.some((fav) => fav.id === f.id))
         .map((f) => ({
@@ -467,7 +528,7 @@ app.get("/filters", async (req, res) => {
     // 4. Build swimlane-like quick filters from boards
     for (const board of results.boards) {
       try {
-        const props = await jiraFetchAgile(`/board/${board.id}/properties/GreenHopper.quickFilters`);
+        const props = await jiraFetchAgile(`/board/${board.id}/properties/GreenHopper.quickFilters`, req.query.serverId);
         if (props.value) {
           board.quickFilters = (Array.isArray(props.value) ? props.value : []).map((qf) => ({
             id: qf.id,
@@ -483,7 +544,7 @@ app.get("/filters", async (req, res) => {
     res.json(results);
   } catch (err) {
     console.error("Error fetching filters:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -496,7 +557,7 @@ app.get("/issues", async (req, res) => {
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged,issuelinks`;
 
     // Paginate to get ALL issues
-    const data = await jiraSearchAll(jql, fieldsStr);
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
 
     const issues = data.issues.map((issue) => {
       const lastComment = issue.fields.comment?.comments?.slice(-1)[0];
@@ -610,16 +671,16 @@ app.get("/issues", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching issues:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
 app.get("/issues/:key", async (req, res) => {
   try {
-    const data = await jiraFetch(`/issue/${req.params.key}`);
+    const data = await jiraFetch(`/issue/${req.params.key}`, req.query.serverId);
     res.json(data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -632,7 +693,8 @@ app.get("/epic/:key", async (req, res) => {
     let epic;
     try {
       const epicRaw = await jiraFetch(
-        `/issue/${epicKey}?fields=summary,status,assignee,priority,created,updated,duedate,description,labels,comment,issuetype`
+        `/issue/${epicKey}?fields=summary,status,assignee,priority,created,updated,duedate,description,labels,comment,issuetype`,
+        req.query.serverId
       );
       epic = {
         key: epicRaw.key,
@@ -657,7 +719,7 @@ app.get("/epic/:key", async (req, res) => {
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,issuelinks,timetracking,${epicFieldsList},parent`;
 
     // Paginate to get ALL children
-    const data = await jiraSearchAll(jql, fieldsStr);
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
 
     const tickets = data.issues.map((issue) => {
       const comments = (issue.fields.comment?.comments || []).map((c) => ({
@@ -723,7 +785,7 @@ app.get("/epic/:key", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching epic detail:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -734,7 +796,7 @@ app.get("/issue/:key", async (req, res) => {
     const epicFieldsList = EPIC_LINK_FIELDS.join(",");
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,issuelinks,timetracking,${epicFieldsList},parent`;
 
-    const raw = await jiraFetch(`/issue/${issueKey}?fields=${fieldsStr}&expand=changelog`);
+    const raw = await jiraFetch(`/issue/${issueKey}?fields=${fieldsStr}&expand=changelog`, req.query.serverId);
     const f = raw.fields;
 
     const comments = (f.comment?.comments || []).map((c) => ({
@@ -821,7 +883,7 @@ app.get("/issue/:key", async (req, res) => {
     res.json({ issue });
   } catch (err) {
     console.error("Error fetching issue detail:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -929,7 +991,7 @@ app.get("/analytics", async (req, res) => {
     const epicFields = EPIC_LINK_FIELDS.join(",");
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged`;
 
-    const data = await jiraSearchAll(jql, fieldsStr);
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
     const now = Date.now();
 
     // ── Ticket Quality Scores ──
@@ -1310,7 +1372,7 @@ app.get("/analytics", async (req, res) => {
     });
   } catch (err) {
     console.error("Error computing analytics:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -1330,7 +1392,7 @@ app.post("/ai/summarize-ticket", async (req, res) => {
     res.json({ issue_key: ticketData.key, prompt });
   } catch (err) {
     console.error("Error building ticket prompt:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -1345,7 +1407,7 @@ app.post("/ai/summarize-board", async (req, res) => {
     res.json({ jql: jql || "unknown", total_issues: tickets.length, prompt });
   } catch (err) {
     console.error("Error building board prompt:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -1357,7 +1419,7 @@ app.get("/hierarchy", async (req, res) => {
     const epicFields = EPIC_LINK_FIELDS.join(",");
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged,subtasks`;
 
-    const data = await jiraSearchAll(jql, fieldsStr);
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
     const now = Date.now();
 
     // Map all issues by key
@@ -1531,7 +1593,7 @@ app.get("/hierarchy", async (req, res) => {
     });
   } catch (err) {
     console.error("Error building hierarchy:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -1620,8 +1682,56 @@ function configResponse() {
     jqlBookmarks: JQL_BOOKMARKS,
     disabledPiChecks: DISABLED_PI_CHECKS,
     configSource,
+    needsSetup: needsSetup(),
   };
 }
+
+// Lightweight status check for frontend setup guard
+app.get("/config/status", (req, res) => {
+  res.json({ needsSetup: needsSetup(), configSource, serverCount: JIRA_SERVERS.length, teamCount: TEAMS.length });
+});
+
+// Test connection to a Jira server (without saving)
+app.post("/config/test-connection", async (req, res) => {
+  let { url, username, token, serverId } = req.body;
+  // Allow testing with saved credentials
+  if (username === "__use_saved__" || token === "__use_saved__") {
+    const existing = JIRA_SERVERS.find((s) => s.url === url) || JIRA_SERVERS.find((s) => s.id === serverId);
+    if (existing) {
+      if (username === "__use_saved__") username = existing.username;
+      if (token === "__use_saved__") token = existing.token;
+    }
+  }
+  if (!url || !username || !token) {
+    return res.status(400).json({ ok: false, error: "URL, username, and token are required" });
+  }
+  try {
+    const testUrl = `${url.replace(/\/+$/, "")}/rest/api/2/myself`;
+    const resp = await fetch(testUrl, {
+      headers: {
+        Authorization: "Basic " + Buffer.from(`${username}:${token}`).toString("base64"),
+        Accept: "application/json",
+      },
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      let detail = `HTTP ${resp.status}`;
+      if (resp.status === 401) detail = "Authentication failed — check username and token";
+      else if (resp.status === 403) detail = "Forbidden — user lacks API access";
+      else if (resp.status === 404) detail = "Jira API not found at this URL";
+      else detail += `: ${text.slice(0, 200)}`;
+      return res.json({ ok: false, error: detail });
+    }
+    const user = await resp.json();
+    return res.json({ ok: true, displayName: user.displayName, emailAddress: user.emailAddress });
+  } catch (err) {
+    const msg = err.cause?.code === "ENOTFOUND" ? `Cannot resolve hostname: ${new URL(url).hostname}`
+      : err.cause?.code === "ECONNREFUSED" ? `Connection refused: ${url}`
+      : err.message === "fetch failed" ? `Cannot reach server at ${url}`
+      : err.message;
+    return res.json({ ok: false, error: msg });
+  }
+});
 
 // Get configuration: servers, teams, PI
 app.get("/config", (req, res) => {
@@ -1691,18 +1801,18 @@ app.post("/config/reset", (req, res) => {
   PROGRAM_SERVER_ID = process.env.PROGRAM_SERVER_ID || "primary";
   JQL_BOOKMARKS = [];
   DISABLED_PI_CHECKS = [];
-  if (JIRA_SERVERS.length === 0) {
+  if (JIRA_SERVERS.length === 0 && JIRA_API_TOKEN) {
     JIRA_SERVERS.push({
       id: "primary", name: "Primary Jira", url: JIRA_BASE_URL,
       username: JIRA_USERNAME, token: JIRA_API_TOKEN,
       projects: [JIRA_PROJECT_KEY], browserUrl: "",
     });
   }
-  if (TEAMS.length === 0) {
-    TEAMS.push({ id: "default", name: "Default Team", serverId: "primary",
-      projectKey: JIRA_PROJECT_KEY, boardId: null, color: "#3B82F6" });
+  if (TEAMS.length === 0 && JIRA_SERVERS.length > 0) {
+    TEAMS.push({ id: "default", name: "Default Team", serverId: JIRA_SERVERS[0].id,
+      projectKey: JIRA_SERVERS[0].projects?.[0] || "TEAM", boardId: null, color: "#3B82F6" });
   }
-  configSource = "env vars";
+  configSource = JIRA_SERVERS.length > 0 ? "env vars" : "defaults";
   res.json(configResponse());
 });
 
@@ -1988,7 +2098,7 @@ app.get("/pi/overview", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching PI overview:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -2047,7 +2157,7 @@ app.get("/pi/team/:teamId", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching team data:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -2110,7 +2220,7 @@ app.get("/pi/follow-ups", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching follow-ups:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -2382,7 +2492,7 @@ app.get("/pi/program-board", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching program board:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -2943,7 +3053,7 @@ app.get("/compliance/projects", async (req, res) => {
     res.json({ projects: results });
   } catch (err) {
     console.error("Error in compliance/projects:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3333,7 +3443,7 @@ app.get("/compliance/pi", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in compliance/pi:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3363,7 +3473,7 @@ app.get("/sprints", async (req, res) => {
     res.json({ sprints, boardId });
   } catch (err) {
     console.error("Error fetching sprints:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3384,7 +3494,7 @@ app.get("/sprints/:id/burndown", async (req, res) => {
     const userJql = req.query.jql;
     const jql = userJql ? `sprint = ${sprintId} AND (${stripOrderBy(userJql)}) ORDER BY created ASC` : `sprint = ${sprintId} ORDER BY created ASC`;
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate,timetracking," + EPIC_LINK_FIELDS.join(",") + ",parent,labels";
-    const data = await jiraSearchAll(jql, fieldsStr);
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
 
     const startDate = new Date(sprint.startDate);
     const endDate = new Date(sprint.endDate || sprint.completeDate || new Date());
@@ -3428,7 +3538,7 @@ app.get("/sprints/:id/burndown", async (req, res) => {
     res.json({ sprint, daily, issues: issueDetails, totalPoints, totalIssues });
   } catch (err) {
     console.error("Error fetching burndown:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3479,7 +3589,7 @@ app.get("/velocity", async (req, res) => {
     res.json({ velocity, avgVelocity });
   } catch (err) {
     console.error("Error fetching velocity:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3491,7 +3601,7 @@ app.get("/flow/cfd", async (req, res) => {
     const jql = req.query.jql || DEFAULT_JQL;
     const days = parseInt(req.query.days) || 30;
     const fieldsStr = "status,created,updated,resolutiondate";
-    const data = await jiraSearchAll(jql, fieldsStr);
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
 
     const now = new Date();
     const startDate = new Date(now.getTime() - days * 86400000);
@@ -3524,7 +3634,7 @@ app.get("/flow/cfd", async (req, res) => {
     res.json({ daily: dailyData, totalIssues: data.issues.length });
   } catch (err) {
     console.error("Error fetching CFD:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3533,7 +3643,7 @@ app.get("/flow/cycle-time", async (req, res) => {
   try {
     const jql = req.query.jql || `project = ${JIRA_PROJECT_KEY} AND statusCategory = Done ORDER BY resolutiondate DESC`;
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate";
-    const data = await jiraSearchAll(jql, fieldsStr, 200);
+    const data = await jiraSearchAll(jql, fieldsStr, 200, "", req.query.serverId);
 
     const items = data.issues
       .filter(i => i.fields.resolutiondate && i.fields.created)
@@ -3563,7 +3673,7 @@ app.get("/flow/cycle-time", async (req, res) => {
     res.json({ items, percentiles: { p50, p85, p95, avg }, total: items.length });
   } catch (err) {
     console.error("Error fetching cycle time:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3572,7 +3682,7 @@ app.get("/flow/metrics", async (req, res) => {
   try {
     const jql = req.query.jql || DEFAULT_JQL;
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate";
-    const data = await jiraSearchAll(jql, fieldsStr);
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
     const now = Date.now();
 
     // Throughput: items completed per week over last 8 weeks
@@ -3628,7 +3738,7 @@ app.get("/flow/metrics", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching flow metrics:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3639,7 +3749,7 @@ app.get("/standup", async (req, res) => {
     const hours = parseInt(req.query.hours) || 24;
     const jql = req.query.jql || DEFAULT_JQL;
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate,comment,labels," + EPIC_LINK_FIELDS.join(",") + ",parent";
-    const data = await jiraSearchAll(jql, fieldsStr, 100, "changelog");
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "changelog", req.query.serverId);
 
     const cutoff = new Date(Date.now() - hours * 3600000);
     const now = Date.now();
@@ -3822,7 +3932,7 @@ app.get("/standup", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching standup data:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3888,7 +3998,7 @@ app.get("/sprint-review", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching sprint review:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -3898,7 +4008,7 @@ app.get("/dor", async (req, res) => {
   try {
     const jql = req.query.jql || `project = ${JIRA_PROJECT_KEY} AND statusCategory != Done ORDER BY priority ASC, created DESC`;
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,duedate,description,labels,timetracking," + EPIC_LINK_FIELDS.join(",") + ",parent";
-    const data = await jiraSearchAll(jql, fieldsStr);
+    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
 
     const items = data.issues.map(i => {
       const f = i.fields;
@@ -3973,7 +4083,7 @@ app.get("/dor", async (req, res) => {
     res.json({ items, readyCount, totalCount: items.length, avgScore, distribution, topMissing });
   } catch (err) {
     console.error("Error fetching DoR:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -4153,7 +4263,7 @@ Provide a helpful, actionable response. Be specific and reference the data when 
     res.json({ prompt, context, question });
   } catch (err) {
     console.error("Error in AI coach:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -4177,7 +4287,7 @@ app.get("/dependencies", async (req, res) => {
     const projectsJql = req.query.jql || `project in (${allProjects.join(",")}) AND statusCategory != Done ORDER BY priority ASC, updated DESC`;
     const fieldsStr = `summary,status,assignee,priority,issuetype,created,updated,duedate,issuelinks,${EPIC_LINK_FIELDS.join(",")},parent,labels`;
 
-    const data = await jiraSearchAll(projectsJql, fieldsStr, 200);
+    const data = await jiraSearchAll(projectsJql, fieldsStr, 200, "", req.query.serverId);
 
     // Build dependency graph
     const nodes = {};
@@ -4283,7 +4393,7 @@ app.get("/dependencies", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching dependencies:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -4312,7 +4422,7 @@ app.post("/dependencies/discover", async (req, res) => {
     for (const pk of allProjects) {
       const jql = `project = ${pk} AND statusCategory != Done ORDER BY priority ASC, updated DESC`;
       const fieldsStr = `summary,status,assignee,priority,issuetype,description,labels,duedate,${EPIC_LINK_FIELDS.join(",")},parent`;
-      const data = await jiraSearchAll(jql, fieldsStr, 100);
+      const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
       projectIssues[pk] = data.issues.map(i => ({
         key: i.key,
         summary: i.fields.summary,
@@ -4405,7 +4515,7 @@ Respond with ONLY valid JSON (no markdown, no backticks):
     });
   } catch (err) {
     console.error("Error discovering dependencies:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(errorResponse(req, err));
   }
 });
 
@@ -4413,7 +4523,7 @@ Respond with ONLY valid JSON (no markdown, no backticks):
 app.listen(PORT, async () => {
   console.log(`Dashboard API running on port ${PORT}`);
   console.log(`Config loaded from: ${configSource}`);
-  console.log(`Jira: ${JIRA_BASE_URL}`);
+  console.log(`Jira: ${defaultServer().url}`);
   console.log(`Teams: ${TEAMS.map((t) => t.name).join(", ")}`);
   console.log(`Servers: ${JIRA_SERVERS.map((s) => s.name).join(", ")}`);
   await detectEpicFields();

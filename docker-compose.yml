@@ -50,12 +50,9 @@ services:
     ports:
       - "${API_PORT:-3011}:3001"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
-      - JIRA_BASE_URL=http://jira:8080
-      - JIRA_BROWSER_URL=${NEXT_PUBLIC_JIRA_BASE_URL:-http://localhost:9080}
-      - JIRA_PROJECT_KEY=${JIRA_PROJECT_KEY:-TEAM}
-      - AI_PROVIDER=${AI_PROVIDER:-mock}
       - API_PORT=3001
       - CONFIG_DIR=/data
     volumes:
