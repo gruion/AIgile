@@ -1,11 +1,10 @@
 #!/bin/sh
-# Replace the build-time placeholder with the runtime INTERNAL_API_URL.
-# When INTERNAL_API_URL is set, Next.js fallback rewrites proxy API calls
-# to the internal backend service (no external route needed).
-if [ -n "$INTERNAL_API_URL" ]; then
-  echo "Enabling API proxy → $INTERNAL_API_URL"
-  find /app/.next -name '*.json' -exec \
-    sed -i "s|http://__INTERNAL_API_PLACEHOLDER__|${INTERNAL_API_URL}|g" {} +
+# Replace build-time placeholder with runtime NEXT_PUBLIC_API_URL
+# Works on OpenShift (restricted SCC) by copying everything to writable /tmp
+if [ -n "$NEXT_PUBLIC_API_URL" ] && [ "$NEXT_PUBLIC_API_URL" != "__API_URL_PLACEHOLDER__" ]; then
+  echo "Patching API URL → $NEXT_PUBLIC_API_URL"
+  cp -r /app /tmp/app
+  find /tmp/app -name '*.js' -exec sed -i "s|__API_URL_PLACEHOLDER__|$NEXT_PUBLIC_API_URL|g" {} +
+  cd /tmp/app
 fi
-
 exec node server.js

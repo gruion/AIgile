@@ -260,15 +260,20 @@ export default function SprintReviewPage() {
 
   if (!data || !data.sprint) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="bg-white rounded-xl border border-gray-200 p-10 max-w-md text-center">
-          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gray-100 flex items-center justify-center">
-            <svg className="w-8 h-8 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
+      <div className="min-h-screen bg-gray-50">
+        <div className="max-w-6xl mx-auto px-4 py-8">
+          <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6">
+            <JqlBar
+              value={inputJql}
+              onChange={setInputJql}
+              onSubmit={(q) => setJql(q)}
+              placeholder="Enter JQL to review tickets..."
+            />
           </div>
-          <h2 className="text-lg font-semibold text-gray-800 mb-2">No Active Sprint</h2>
-          <p className="text-gray-500 text-sm">There is no active sprint to review right now. Start a sprint in Jira and come back here for the review dashboard.</p>
+          <div className="text-center py-20 text-gray-400">
+            <p className="text-lg font-medium text-gray-500 mb-2">No data to review</p>
+            <p className="text-sm">Enter a JQL query above to load tickets for sprint review.</p>
+          </div>
         </div>
       </div>
     );
@@ -313,9 +318,11 @@ export default function SprintReviewPage() {
                 <p className="text-gray-500 mt-1">{sprint.goal}</p>
               )}
             </div>
-            <div className="text-sm text-gray-400 shrink-0">
-              {formatDate(sprint.startDate)} &mdash; {formatDate(sprint.endDate)}
-            </div>
+            {sprint.startDate && sprint.endDate && (
+              <div className="text-sm text-gray-400 shrink-0">
+                {formatDate(sprint.startDate)} &mdash; {formatDate(sprint.endDate)}
+              </div>
+            )}
           </div>
         </div>
 

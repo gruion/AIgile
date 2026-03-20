@@ -3,12 +3,12 @@
 # Route: http://aigilecoach.example.com
 #
 # Build & push images:
-#   docker build -t gruion/all:aigilecoach-api -f api/Dockerfile .
-#   docker build -t gruion/all:aigilecoach-frontend \
+#   docker build -t gruion/all:aigilecoach-api-v1.1 -f api/Dockerfile .
+#   docker build -t gruion/all:aigilecoach-frontend-v1.1 \
 #     --build-arg NEXT_PUBLIC_API_URL=http://aigilecoach-api.example.com \
 #     ./frontend
-#   docker push gruion/all:aigilecoach-api
-#   docker push gruion/all:aigilecoach-frontend
+#   docker push gruion/all:aigilecoach-api-v1.1
+#   docker push gruion/all:aigilecoach-frontend-v1.1
 # ============================================================
 
 # ─── Namespace ───────────────────────────────────────────────
@@ -273,7 +273,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: gruion/all:aigilecoach-api
+          image: gruion/all:aigilecoach-api-v1.1
           ports:
             - containerPort: 3001
           env:
@@ -348,7 +348,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: gruion/all:aigilecoach-frontend
+          image: gruion/all:aigilecoach-frontend-v1.1
           ports:
             - containerPort: 3000
           resources:

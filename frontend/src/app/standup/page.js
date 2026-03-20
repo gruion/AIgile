@@ -94,6 +94,7 @@ function ChangeBadge({ type, detail }) {
 }
 
 function DetailedIssueCard({ issue, showComments = true }) {
+  const { jiraBaseUrl } = useAppConfig();
   const [expanded, setExpanded] = useState(false);
   const commentCount = issue.recentComments?.length || 0;
   const changes = issue.recentChanges || [];
@@ -254,6 +255,7 @@ function WorkloadBar({ inProgress, todo, total }) {
 }
 
 function CommentFeed({ comments }) {
+  const { jiraBaseUrl } = useAppConfig();
   const [showAll, setShowAll] = useState(false);
   if (!comments || comments.length === 0) return null;
   const displayed = showAll ? comments : comments.slice(0, 8);
@@ -322,6 +324,7 @@ function filterDataByUser(data, user) {
 
 // ─── Standup content for a tab ─────────────────────────────
 function StandupContent({ data, hours, prompts }) {
+  const { jiraBaseUrl } = useAppConfig();
   const summary = data?.summary || {};
   const workload = data?.workload || {};
 

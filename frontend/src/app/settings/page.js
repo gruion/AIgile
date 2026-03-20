@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { fetchSettings, updateSettings, fetchConfig, updateConfig, fetchPiCompliance, testConnection } from "../../lib/api";
+import { fetchSettings, updateSettings, fetchConfig, updateConfig, fetchPiCompliance, testConnection, importConfig } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 
 const EXAMPLE_TEMPLATES = [
@@ -74,6 +74,8 @@ export default function SettingsPage() {
   const [allPiChecks, setAllPiChecks] = useState([]);
   const [complianceResult, setComplianceResult] = useState(null);
   const [verifying, setVerifying] = useState(false);
+  const [configJsonText, setConfigJsonText] = useState("");
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     Promise.all([fetchSettings(), fetchConfig(), fetchPiCompliance().catch(() => null)])
@@ -812,36 +814,19 @@ export default function SettingsPage() {
                   </div>
                 )}
 
-                {/* Check results (after verify) */}
-                {complianceResult?.checks && (
-                  <div className="space-y-1.5 mb-4">
-                    {complianceResult.checks.map((check) => (
-                      <div key={check.id} className={`flex items-center justify-between text-xs px-3 py-2 rounded-lg border ${
-                        check.score >= 8 ? "bg-green-50 border-green-200" :
-                        check.score >= 5 ? "bg-amber-50 border-amber-200" :
-                        "bg-red-50 border-red-200"
-                      }`}>
-                        <span className="text-gray-700">{check.name}</span>
-                        <div className="flex items-center gap-2">
-                          {check.detail && <span className="text-[10px] text-gray-400 max-w-[300px] truncate">{check.detail}</span>}
-                          <span className={`font-bold ${
-                            check.score >= 8 ? "text-green-600" :
-                            check.score >= 5 ? "text-amber-600" :
-                            "text-red-600"
-                          }`}>{check.score}/{check.maxScore}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Checkboxes to enable/disable checks */}
-                <div className="grid grid-cols-2 gap-1.5">
+                {/* Checks with toggle + score */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                   {allPiChecks.map((check) => {
                     const isDisabled = disabledPiChecks.includes(check.id);
+                    const result = complianceResult?.checks?.find((c) => c.id === check.id);
+                    const scoreBg = !result ? "" :
+                      result.score >= 8 ? "bg-green-50 border-green-200" :
+                      result.score >= 5 ? "bg-amber-50 border-amber-200" :
+                      "bg-red-50 border-red-200";
                     return (
                       <label key={check.id} className={`flex items-center gap-2 text-xs px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
-                        isDisabled ? "bg-gray-50 border-gray-200 text-gray-400" : "bg-green-50 border-green-200 text-gray-700"
+                        isDisabled ? "bg-gray-50 border-gray-200 text-gray-400" :
+                        result ? scoreBg : "bg-green-50 border-green-200 text-gray-700"
                       }`}>
                         <input
                           type="checkbox"
@@ -853,9 +838,20 @@ export default function SettingsPage() {
                                 : [...prev, check.id]
                             );
                           }}
-                          className="rounded border-gray-300"
+                          className="rounded border-gray-300 shrink-0"
                         />
-                        {check.name}
+                        <span className="flex-1 min-w-0 truncate">{check.name}</span>
+                        {result && !isDisabled && (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {result.detail && <span className="text-[10px] text-gray-400 max-w-[150px] truncate hidden lg:inline">{result.detail}</span>}
+                            <span className={`font-bold text-[11px] ${
+                              result.score >= 8 ? "text-green-600" :
+                              result.score >= 5 ? "text-amber-600" :
+                              "text-red-600"
+                            }`}>{result.score}/{result.maxScore}</span>
+                          </div>
+                        )}
+                        {isDisabled && <span className="text-[10px] text-gray-400 shrink-0">off</span>}
                       </label>
                     );
                   })}
@@ -865,6 +861,85 @@ export default function SettingsPage() {
                 </p>
               </div>
             )}
+
+            {/* Config Import / Export */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="text-sm font-semibold text-gray-800 mb-1">Import / Export Configuration</h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Paste a <code className="bg-gray-100 px-1 rounded">config.json</code> to override the current configuration.
+                This replaces servers, teams, PI config, and all other settings.
+              </p>
+
+              {/* Export */}
+              <div className="mb-4">
+                <button
+                  onClick={async () => {
+                    try {
+                      const cfg = await fetchConfig();
+                      setConfigJsonText(JSON.stringify(cfg, null, 2));
+                      toast.success("Current config loaded into editor");
+                    } catch (err) {
+                      toast.error("Failed to export config: " + err.message);
+                    }
+                  }}
+                  className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-md transition-colors"
+                >
+                  Load Current Config
+                </button>
+              </div>
+
+              {/* Textarea */}
+              <textarea
+                value={configJsonText}
+                onChange={(e) => setConfigJsonText(e.target.value)}
+                placeholder='Paste config.json content here...'
+                rows={12}
+                className="w-full text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+
+              {/* Import button */}
+              <div className="flex items-center gap-3 mt-3">
+                <button
+                  onClick={async () => {
+                    if (!configJsonText.trim()) {
+                      toast.error("Paste a config.json first");
+                      return;
+                    }
+                    let parsed;
+                    try {
+                      parsed = JSON.parse(configJsonText);
+                    } catch {
+                      toast.error("Invalid JSON — check syntax");
+                      return;
+                    }
+                    setImporting(true);
+                    try {
+                      const result = await importConfig(parsed);
+                      // Reload page state with imported config
+                      if (result.servers) setServers(result.servers.map((s, i) => ({ ...s, _key: `srv-${i}-${Date.now()}` })));
+                      if (result.teams) setTeams(result.teams);
+                      if (result.piConfig) setPiConfig(result.piConfig);
+                      if (result.programBoard) setProgramBoard(result.programBoard);
+                      if (result.defaultTeamId !== undefined) setDefaultTeamId(result.defaultTeamId);
+                      if (result.disabledPiChecks) setDisabledPiChecks(result.disabledPiChecks);
+                      if (result.configSource) setConfigSource(result.configSource);
+                      toast.success("Configuration imported successfully");
+                      setConfigJsonText("");
+                    } catch (err) {
+                      toast.error("Import failed: " + err.message);
+                    }
+                    setImporting(false);
+                  }}
+                  disabled={importing || !configJsonText.trim()}
+                  className="text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-4 py-1.5 rounded-md transition-colors font-medium"
+                >
+                  {importing ? "Importing..." : "Import Config"}
+                </button>
+                <span className="text-[10px] text-gray-400">
+                  Warning: this will overwrite your current configuration
+                </span>
+              </div>
+            </div>
 
             {/* Help */}
             <div className="bg-amber-50 rounded-xl border border-amber-200 p-6">

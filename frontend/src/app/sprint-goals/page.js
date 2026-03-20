@@ -72,7 +72,7 @@ function GoalForm({ sprints, initialData, onSave, onCancel, saving }) {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!sprintName.trim()) {
-      toast.error("Please select a sprint");
+      toast.error("Please enter a sprint name");
       return;
     }
     if (goals.every((g) => !g.text.trim())) {
@@ -100,18 +100,23 @@ function GoalForm({ sprints, initialData, onSave, onCancel, saving }) {
       {/* Sprint selector */}
       <div>
         <label className="text-xs text-gray-500 block mb-1">Sprint</label>
-        <select
+        <input
+          type="text"
+          list="sprint-options"
           value={sprintName}
           onChange={(e) => setSprintName(e.target.value)}
+          placeholder="Type or select a sprint name..."
           className="text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 w-full focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-        >
-          <option value="">Select a sprint...</option>
-          {sprints.map((s) => (
-            <option key={s.id} value={s.name}>
-              {s.name} {s.state === "active" ? "(Active)" : s.state === "closed" ? "(Closed)" : ""}
-            </option>
-          ))}
-        </select>
+        />
+        {sprints.length > 0 && (
+          <datalist id="sprint-options">
+            {sprints.map((s) => (
+              <option key={s.id} value={s.name}>
+                {s.name} {s.state === "active" ? "(Active)" : s.state === "closed" ? "(Closed)" : ""}
+              </option>
+            ))}
+          </datalist>
+        )}
       </div>
 
       {/* Goals list */}
@@ -281,16 +286,19 @@ export default function SprintGoalsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [goalsData, sprintsData] = await Promise.all([
-        fetchSprintGoals(),
-        fetchSprints(),
-      ]);
+      const goalsData = await fetchSprintGoals();
       setGoalSets(goalsData);
-      setSprints(sprintsData.sprints || []);
       toast.success("Sprint goals loaded");
     } catch (err) {
       setError(err.message);
       toast.error("Failed to load sprint goals");
+    }
+    // Sprints fetch is optional — board may not support sprints
+    try {
+      const sprintsData = await fetchSprints();
+      setSprints(sprintsData.sprints || []);
+    } catch {
+      setSprints([]);
     }
     setLoading(false);
   };

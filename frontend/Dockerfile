@@ -5,9 +5,8 @@ COPY package*.json ./
 RUN npm ci
 COPY . .
 
-# NEXT_PUBLIC_* vars are inlined at build time — override for k8s deployments
-ARG NEXT_PUBLIC_API_URL=http://localhost:3011
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# Bake a placeholder — entrypoint.sh replaces it at runtime with NEXT_PUBLIC_API_URL env var
+ENV NEXT_PUBLIC_API_URL=__API_URL_PLACEHOLDER__
 
 RUN npm run build
 
@@ -20,7 +19,6 @@ ENV NODE_ENV=production
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
-# Entrypoint replaces API proxy placeholder with INTERNAL_API_URL env var at startup
 COPY --from=builder /app/entrypoint.sh ./entrypoint.sh
 RUN chmod +x entrypoint.sh
 

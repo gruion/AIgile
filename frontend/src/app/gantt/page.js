@@ -374,6 +374,17 @@ export default function GanttPage() {
 
   const ROW_HEIGHT = 32;
   const EPIC_ROW_HEIGHT = 28;
+  const [timelineWidth, setTimelineWidth] = useState(0);
+  const timelineRef = useRef(null);
+
+  useEffect(() => {
+    if (!timelineRef.current) return;
+    const obs = new ResizeObserver(([entry]) => {
+      setTimelineWidth(entry.contentRect.width);
+    });
+    obs.observe(timelineRef.current);
+    return () => obs.disconnect();
+  }, []);
 
   return (
     <div className="min-h-screen">
@@ -536,7 +547,7 @@ export default function GanttPage() {
               </div>
 
               {/* Right: Timeline */}
-              <div className="flex-1 relative">
+              <div className="flex-1 relative" ref={timelineRef}>
                 <TimelineHeader timelineStart={gantt.timelineStart} totalDays={gantt.totalDays} />
 
                 {/* Grid lines (weekly) */}
@@ -583,7 +594,7 @@ export default function GanttPage() {
                     );
                   })}
                   {/* Dependency arrows overlay */}
-                  {showDeps && depEdges.length > 0 && (
+                  {showDeps && depEdges.length > 0 && timelineWidth > 0 && (
                     <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ zIndex: 20 }}>
                       <defs>
                         <marker id="dep-arrow" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
@@ -605,12 +616,14 @@ export default function GanttPage() {
                         const fromRow = groupedRows[edge.fromIdx];
                         const toRow = groupedRows[edge.toIdx];
                         if (!fromRow || !toRow || fromRow.type === "epic" || toRow.type === "epic") return null;
-                        const x1Pct = ((daysBetween(gantt.timelineStart, fromRow.end) / gantt.totalDays) * 100);
-                        const x2Pct = ((daysBetween(gantt.timelineStart, toRow.start) / gantt.totalDays) * 100);
+                        const x1 = (daysBetween(gantt.timelineStart, fromRow.end) / gantt.totalDays) * timelineWidth;
+                        const x2 = (daysBetween(gantt.timelineStart, toRow.start) / gantt.totalDays) * timelineWidth;
+                        if (!isFinite(x1) || !isFinite(x2) || !isFinite(y1) || !isFinite(y2)) return null;
+                        const cx = (x1 + x2) / 2;
                         return (
                           <path
                             key={ei}
-                            d={`M ${x1Pct}% ${y1} C ${(x1Pct + x2Pct) / 2}% ${y1}, ${(x1Pct + x2Pct) / 2}% ${y2}, ${x2Pct}% ${y2}`}
+                            d={`M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`}
                             fill="none"
                             stroke={edge.isBlocking ? "#ef4444" : "#9ca3af"}
                             strokeWidth={edge.isBlocking ? 2 : 1}

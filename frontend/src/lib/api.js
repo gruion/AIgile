@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3011";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3011";
 
 // Helper: read error detail from API JSON response body
 async function throwApiError(res, fallback) {
@@ -150,6 +150,16 @@ export async function updateConfig(config) {
     body: JSON.stringify(config),
   });
   if (!res.ok) await throwApiError(res,"Failed to update config");
+  return res.json();
+}
+
+export async function importConfig(configJson) {
+  const res = await fetch(`${API_URL}/config/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(configJson),
+  });
+  if (!res.ok) await throwApiError(res,"Failed to import config");
   return res.json();
 }
 

@@ -1,16 +1,12 @@
 # ============================================================
-# AIgileCoach — OpenShift Manifests (Internal API — external Jira)
-# The API is NOT exposed via a Route. Instead, the Next.js frontend
-# proxies all API calls to the backend through internal OCP networking.
-# The proxy target is configured at runtime via INTERNAL_API_URL env var.
+# AIgileCoach — OpenShift Manifests (External API Route)
+# Both frontend and API are exposed via Routes.
 #
-# Build & push images (same image for both modes):
-#   docker build -t gruion/all:aigilecoach-api -f api/Dockerfile .
-#   docker build -t gruion/all:aigilecoach-frontend \
-#     --build-arg NEXT_PUBLIC_API_URL="" \
-#     ./frontend
-#   docker push gruion/all:aigilecoach-api
-#   docker push gruion/all:aigilecoach-frontend
+# Build & push images:
+#   docker build --platform linux/amd64 -t gruion/all:aigilecoach-api-v1.1 -f api/Dockerfile .
+#   docker build --platform linux/amd64 -t gruion/all:aigilecoach-frontend-v1.1 ./frontend
+#   docker push gruion/all:aigilecoach-api-v1.1
+#   docker push gruion/all:aigilecoach-frontend-v1.1
 # ============================================================
 
 # ─── Namespace ───────────────────────────────────────────────
@@ -22,24 +18,8 @@ metadata:
     app.kubernetes.io/part-of: aigilecoach
 
 ---
-# ─── PVC for API config persistence ─────────────────────────
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: dashboard-config
-  namespace: aigilecoach
-  labels:
-    app.kubernetes.io/part-of: aigilecoach
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi
-
----
 # ═════════════════════════════════════════════════════════════
-# API Backend (internal only — no Route)
-# Reachable inside the cluster at: http://aigilecoach-api:3001
+# API Backend
 # ═════════════════════════════════════════════════════════════
 
 apiVersion: apps/v1
@@ -62,7 +42,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: gruion/all:aigilecoach-api
+          image: gruion/all:aigilecoach-api-v1.1
           ports:
             - containerPort: 3001
           env:
@@ -94,11 +74,9 @@ spec:
             periodSeconds: 10
       volumes:
         - name: config
-          persistentVolumeClaim:
-            claimName: dashboard-config
+          emptyDir: {}
 
 ---
-# ClusterIP Service — internal only, no Route
 apiVersion: v1
 kind: Service
 metadata:
@@ -107,7 +85,6 @@ metadata:
   labels:
     app: api
 spec:
-  type: ClusterIP
   selector:
     app: api
   ports:
@@ -116,8 +93,7 @@ spec:
 
 ---
 # ═════════════════════════════════════════════════════════════
-# Frontend (Next.js) — proxies API calls to internal backend
-# INTERNAL_API_URL env var is resolved at container startup
+# Frontend (Next.js)
 # ═════════════════════════════════════════════════════════════
 
 apiVersion: apps/v1
@@ -140,12 +116,12 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: gruion/all:aigilecoach-frontend
+          image: gruion/all:aigilecoach-frontend-v1.1
           ports:
             - containerPort: 3000
           env:
-            - name: INTERNAL_API_URL
-              value: "http://aigilecoach-api:3001"
+            - name: NEXT_PUBLIC_API_URL
+              value: "http://aigilecoach-api.example.com"
           resources:
             requests:
               cpu: 100m
@@ -183,7 +159,7 @@ spec:
 
 ---
 # ═════════════════════════════════════════════════════════════
-# OpenShift Route — frontend only (single entry point)
+# OpenShift Routes
 # ═════════════════════════════════════════════════════════════
 
 apiVersion: route.openshift.io/v1
@@ -203,4 +179,24 @@ spec:
   to:
     kind: Service
     name: aigilecoach-frontend
+    weight: 100
+
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: aigilecoach-api
+  namespace: aigilecoach
+  labels:
+    app: api
+    app.kubernetes.io/part-of: aigilecoach
+  annotations:
+    haproxy.router.openshift.io/timeout: 120s
+spec:
+  host: aigilecoach-api.example.com
+  port:
+    targetPort: 3001
+  to:
+    kind: Service
+    name: aigilecoach-api
     weight: 100

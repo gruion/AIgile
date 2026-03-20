@@ -132,7 +132,7 @@ function stripOrderBy(jql) {
 // JIRA_BROWSER_URL should be set to the external URL reachable from the browser.
 const JIRA_BROWSER_URL = process.env.JIRA_BROWSER_URL || process.env.NEXT_PUBLIC_JIRA_BASE_URL || "";
 function getBrowserUrl(server) {
-  return server.browserUrl || JIRA_BROWSER_URL;
+  return server.browserUrl || JIRA_BROWSER_URL || server.url || "";
 }
 
 // Helper: fetch from a specific server
@@ -1848,6 +1848,29 @@ app.post("/config", (req, res) => {
   configSource = "file";
   saveConfigToFile();
   res.json(configResponse());
+});
+
+// Import full config.json — replaces everything
+app.post("/config/import", (req, res) => {
+  try {
+    const data = req.body;
+    if (!data || typeof data !== "object") {
+      return res.status(400).json({ error: "Invalid JSON" });
+    }
+    if (data.servers && Array.isArray(data.servers)) JIRA_SERVERS = data.servers;
+    if (data.teams && Array.isArray(data.teams)) TEAMS = data.teams;
+    if (data.piConfig) PI_CONFIG = { ...PI_CONFIG, ...data.piConfig };
+    if (data.programProject !== undefined) PROGRAM_PROJECT = data.programProject;
+    if (data.programServerId !== undefined) PROGRAM_SERVER_ID = data.programServerId;
+    if (data.defaultTeamId !== undefined) DEFAULT_TEAM_ID = data.defaultTeamId;
+    if (data.jqlBookmarks && Array.isArray(data.jqlBookmarks)) JQL_BOOKMARKS = data.jqlBookmarks;
+    if (data.disabledPiChecks && Array.isArray(data.disabledPiChecks)) DISABLED_PI_CHECKS = data.disabledPiChecks;
+    configSource = "file";
+    saveConfigToFile();
+    res.json({ ok: true, ...configResponse() });
+  } catch (err) {
+    res.status(400).json({ error: "Failed to import config: " + err.message });
+  }
 });
 
 // Reset config: delete file and reload from env vars
@@ -4011,24 +4034,33 @@ app.get("/standup", async (req, res) => {
 
 app.get("/sprint-review", async (req, res) => {
   try {
-    const team = TEAMS[0];
-    const server = getServer(team?.serverId);
-    let boardId = team?.boardId;
+    const userJql = req.query.jql || DEFAULT_JQL;
+    if (!userJql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
 
-    if (!boardId) {
-      const boards = await jiraFetchAgileFrom(server, `/board?projectKeyOrId=${team?.projectKey || JIRA_PROJECT_KEY}&maxResults=1`);
-      boardId = boards.values?.[0]?.id;
-      if (!boardId) return res.json({ sprint: null, message: "No board found" });
+    const team = TEAMS[0];
+    const server = getServer(team?.serverId || req.query.serverId);
+    let activeSprint = null;
+
+    // Try to get active sprint info (optional — works without it)
+    try {
+      let boardId = team?.boardId;
+      if (!boardId) {
+        const boards = await jiraFetchAgileFrom(server, `/board?projectKeyOrId=${team?.projectKey || JIRA_PROJECT_KEY}&maxResults=1`);
+        boardId = boards.values?.[0]?.id;
+      }
+      if (boardId) {
+        const sprintData = await jiraFetchAgileFrom(server, `/board/${boardId}/sprint?state=active&maxResults=1`);
+        activeSprint = sprintData.values?.[0] || null;
+      }
+    } catch {
+      // Board/sprint API not available — continue with JQL-only mode
     }
 
-    // Get active sprint
-    const sprintData = await jiraFetchAgileFrom(server, `/board/${boardId}/sprint?state=active&maxResults=1`);
-    const activeSprint = sprintData.values?.[0];
-    if (!activeSprint) return res.json({ sprint: null, message: "No active sprint" });
+    // Build JQL: if we found an active sprint, scope to it; otherwise use the user's JQL as-is
+    const jql = activeSprint
+      ? `sprint = ${activeSprint.id} AND (${stripOrderBy(userJql)}) ORDER BY status DESC, priority ASC`
+      : userJql;
 
-    // Get sprint issues
-    const userJql = req.query.jql;
-    const jql = userJql ? `sprint = ${activeSprint.id} AND (${stripOrderBy(userJql)}) ORDER BY status DESC, priority ASC` : `sprint = ${activeSprint.id} ORDER BY status DESC, priority ASC`;
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate,description,labels," + EPIC_LINK_FIELDS.join(",") + ",parent";
     const data = await jiraSearchAllFrom(server, jql, fieldsStr, 200);
 
@@ -4058,14 +4090,13 @@ app.get("/sprint-review", async (req, res) => {
     const todo = issues.filter(i => i.statusCategory === "new").length;
 
     res.json({
-      sprint: {
-        id: activeSprint.id, name: activeSprint.name,
-        goal: activeSprint.goal || "",
-        startDate: activeSprint.startDate, endDate: activeSprint.endDate,
-      },
+      sprint: activeSprint
+        ? { id: activeSprint.id, name: activeSprint.name, goal: activeSprint.goal || "", startDate: activeSprint.startDate, endDate: activeSprint.endDate }
+        : { id: null, name: "Sprint Review (JQL)", goal: "", startDate: null, endDate: null },
       stats: { total: issues.length, done, inProgress, todo, completionRate: issues.length > 0 ? Math.round((done / issues.length) * 100) : 0 },
       epicGroups: Object.values(epicGroups).sort((a, b) => b.total - a.total),
       issues,
+      serverUrl: getBrowserUrl(server),
     });
   } catch (err) {
     console.error("Error fetching sprint review:", err.message);
