@@ -8,9 +8,10 @@ dotenv.config({ path: resolve(__dirname, "../.env") });
 
 import express from "express";
 import cors from "cors";
+import crypto from "crypto";
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
 // ─── Config ──────────────────────────────────────────────
@@ -40,12 +41,8 @@ function saveConfigToFile() {
     const data = {
       servers: JIRA_SERVERS,
       teams: TEAMS,
-      piConfig: PI_CONFIG,
-      programProject: PROGRAM_PROJECT,
-      programServerId: PROGRAM_SERVER_ID,
       defaultTeamId: DEFAULT_TEAM_ID,
       jqlBookmarks: JQL_BOOKMARKS,
-      disabledPiChecks: DISABLED_PI_CHECKS,
     };
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
   } catch (err) {
@@ -59,38 +56,20 @@ let configSource = "defaults";
 
 let JIRA_SERVERS = [];
 let TEAMS = [];
-let PI_CONFIG = { name: "", startDate: "", endDate: "", sprintCount: 5, sprintDuration: 14, enabled: false };
-let PROGRAM_PROJECT = "";
-let PROGRAM_SERVER_ID = "primary";
 let DEFAULT_TEAM_ID = "";
 let JQL_BOOKMARKS = []; // [{ id, name, jql }]
-let DISABLED_PI_CHECKS = []; // array of check ids to skip in PI compliance
 
 if (fileConfig) {
   // Tier 1: persisted config file
   configSource = "file";
   JIRA_SERVERS = fileConfig.servers || [];
   TEAMS = fileConfig.teams || [];
-  if (fileConfig.piConfig) PI_CONFIG = { ...PI_CONFIG, ...fileConfig.piConfig };
-  PROGRAM_PROJECT = fileConfig.programProject ?? "";
-  PROGRAM_SERVER_ID = fileConfig.programServerId ?? "primary";
   DEFAULT_TEAM_ID = fileConfig.defaultTeamId ?? "";
   JQL_BOOKMARKS = fileConfig.jqlBookmarks || [];
-  DISABLED_PI_CHECKS = fileConfig.disabledPiChecks || [];
 } else {
   // Tier 2: environment variables
   try { JIRA_SERVERS = JSON.parse(process.env.JIRA_SERVERS || "[]"); } catch { JIRA_SERVERS = []; }
   try { TEAMS = JSON.parse(process.env.TEAMS || "[]"); } catch { TEAMS = []; }
-  PI_CONFIG = {
-    name: process.env.PI_NAME || "",
-    startDate: process.env.PI_START_DATE || "",
-    endDate: process.env.PI_END_DATE || "",
-    sprintCount: parseInt(process.env.PI_SPRINT_COUNT) || 5,
-    sprintDuration: parseInt(process.env.PI_SPRINT_DURATION) || 14,
-    enabled: !!(process.env.PI_START_DATE && process.env.PI_END_DATE),
-  };
-  PROGRAM_PROJECT = process.env.PROGRAM_PROJECT || "";
-  PROGRAM_SERVER_ID = process.env.PROGRAM_SERVER_ID || "primary";
   if (JIRA_SERVERS.length > 0 || TEAMS.length > 0) configSource = "env vars";
 }
 
@@ -248,35 +227,42 @@ let PROMPT_SETTINGS = {
 let EPIC_LINK_FIELDS = ["customfield_10014", "customfield_10101"];
 let HAS_EPIC_LINK_JQL = false; // whether "Epic Link" JQL clause works
 
-async function detectEpicFields() {
-  try {
-    const fields = await jiraFetch("/field");
-    const epicLinkField = fields.find(
-      (f) => f.name === "Epic Link" || f.clauseNames?.includes("'Epic Link'")
-    );
-    const epicNameField = fields.find(
-      (f) => f.name === "Epic Name" || f.clauseNames?.includes("'Epic Name'")
-    );
-    const detected = [];
-    if (epicLinkField) {
-      detected.push(epicLinkField.id);
-      HAS_EPIC_LINK_JQL = true;
-      console.log(`Epic Link JQL supported (field: ${epicLinkField.id})`);
+async function detectEpicFields(retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const fields = await jiraFetch("/field");
+      const epicLinkField = fields.find(
+        (f) => f.name === "Epic Link" || f.clauseNames?.includes("'Epic Link'")
+      );
+      const epicNameField = fields.find(
+        (f) => f.name === "Epic Name" || f.clauseNames?.includes("'Epic Name'")
+      );
+      const detected = [];
+      if (epicLinkField) {
+        detected.push(epicLinkField.id);
+        HAS_EPIC_LINK_JQL = true;
+        console.log(`Epic Link JQL supported (field: ${epicLinkField.id})`);
+      }
+      if (epicNameField && epicNameField.id !== epicLinkField?.id) {
+        detected.push(epicNameField.id);
+      }
+      for (const f of ["customfield_10014", "customfield_10101"]) {
+        if (!detected.includes(f)) detected.push(f);
+      }
+      EPIC_LINK_FIELDS = detected;
+      console.log(`Epic fields: ${EPIC_LINK_FIELDS.join(", ")}`);
+      if (!HAS_EPIC_LINK_JQL) {
+        console.log("Epic Link JQL NOT available — using parent-based queries");
+      }
+      return; // success
+    } catch (err) {
+      console.warn(`Could not auto-detect epic fields, attempt ${attempt}/${retries} (${err.message})`);
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 5000 * attempt)); // wait 5s, 10s...
+      }
     }
-    if (epicNameField && epicNameField.id !== epicLinkField?.id) {
-      detected.push(epicNameField.id);
-    }
-    for (const f of ["customfield_10014", "customfield_10101"]) {
-      if (!detected.includes(f)) detected.push(f);
-    }
-    EPIC_LINK_FIELDS = detected;
-    console.log(`Epic fields: ${EPIC_LINK_FIELDS.join(", ")}`);
-    if (!HAS_EPIC_LINK_JQL) {
-      console.log("Epic Link JQL NOT available — using parent-based queries");
-    }
-  } catch (err) {
-    console.warn(`Could not auto-detect epic fields (${err.message}), using defaults`);
   }
+  console.warn("Epic field detection failed after all retries, using defaults + Epic Link fallback in JQL");
 }
 
 function getEpicKey(fields) {
@@ -304,7 +290,7 @@ function resolveServer(serverId) {
   if (JIRA_SERVERS.length > 0) return JIRA_SERVERS[0];
   return { url: JIRA_BASE_URL, username: JIRA_USERNAME, token: JIRA_API_TOKEN, name: "default" };
 }
-function defaultServer() { return resolveServer(); }
+function defaultServer() { return resolveServer(null); }
 
 // Resolve server from project key by checking which team owns it
 function resolveServerForProject(projectKey) {
@@ -326,13 +312,16 @@ function extractProjectFromJql(jql) {
 
 // Resolve server from serverId query param, or from JQL project key
 function resolveServerFromReq(req) {
-  if (req.query.serverId) return resolveServer(req.query.serverId);
-  const project = extractProjectFromJql(req.query.jql) || req.query.project;
-  if (project) return resolveServerForProject(project);
-  return defaultServer();
+  let server;
+  if (req.query.serverId) server = resolveServer(req.query.serverId);
+  else {
+    const project = extractProjectFromJql(req.query.jql) || req.query.project;
+    server = project ? resolveServerForProject(project) : defaultServer();
+  }
+  return server;
 }
 
-// Middleware: auto-resolve serverId from JQL project key if not explicitly set
+// Middleware: auto-resolve serverId from request context
 app.use((req, res, next) => {
   if (!req.query.serverId) {
     const server = resolveServerFromReq(req);
@@ -463,12 +452,11 @@ function buildEpicChildrenJql(epicKey) {
 
   const clauses = [];
 
-  // Method 2: "Epic Link" — classic Jira Server/DC with Software
-  if (HAS_EPIC_LINK_JQL) {
-    clauses.push(`"Epic Link" = ${epicKey}`);
-  }
+  // Always include "Epic Link" — classic Jira Server/DC with Software
+  // Even if detection failed at startup, this is harmless (Jira ignores invalid OR clauses)
+  clauses.push(`"Epic Link" = ${epicKey}`);
 
-  // Method 3: parent = KEY — Jira 10.x / next-gen / team-managed
+  // Also parent = KEY — Jira 10.x / next-gen / team-managed
   clauses.push(`parent = ${epicKey}`);
 
   return `(${clauses.join(" OR ")}) ORDER BY status ASC, priority DESC`;
@@ -478,6 +466,58 @@ function buildEpicChildrenJql(epicKey) {
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok", jira: JIRA_BASE_URL, epicLinkJql: HAS_EPIC_LINK_JQL });
+});
+
+// ─── AI Provider Config (stored per tenant or in file) ───
+const AI_CONFIG_FILE = resolve(CONFIG_DIR, "ai-config.json");
+
+// In-memory AI config (fallback when no DB)
+let AI_CONFIG = {
+  provider: "",      // "openai" | "anthropic" | "mistral" | "ollama" | "custom"
+  model: "",         // e.g. "gpt-4o", "claude-sonnet-4-5", "mistral-large"
+  apiKey: "",        // user-provided API key (never logged/returned in responses)
+  baseUrl: "",       // for custom/ollama providers
+  enabled: false,
+};
+
+// Load AI config from file on startup
+(function loadAiConfig() {
+  try {
+    const raw = fs.readFileSync(AI_CONFIG_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") AI_CONFIG = { ...AI_CONFIG, ...parsed };
+  } catch {}
+})();
+
+function saveAiConfig() {
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    fs.writeFileSync(AI_CONFIG_FILE, JSON.stringify(AI_CONFIG, null, 2), { mode: 0o600 });
+  } catch (err) {
+    console.error("Failed to save AI config:", err.message);
+  }
+}
+
+app.get("/settings/ai", (req, res) => {
+  res.json({
+    provider: AI_CONFIG.provider,
+    model: AI_CONFIG.model,
+    baseUrl: AI_CONFIG.baseUrl,
+    enabled: AI_CONFIG.enabled,
+    hasApiKey: !!AI_CONFIG.apiKey, // never expose the key
+  });
+});
+
+app.post("/settings/ai", (req, res) => {
+  const { provider, model, apiKey, baseUrl, enabled } = req.body;
+  if (provider !== undefined) AI_CONFIG.provider = provider;
+  if (model !== undefined) AI_CONFIG.model = model;
+  if (apiKey !== undefined && apiKey !== "••••••••") AI_CONFIG.apiKey = apiKey;
+  if (baseUrl !== undefined) AI_CONFIG.baseUrl = baseUrl;
+  if (enabled !== undefined) AI_CONFIG.enabled = !!enabled;
+  saveAiConfig();
+  console.log(`AI config updated: provider=${AI_CONFIG.provider}, model=${AI_CONFIG.model}, enabled=${AI_CONFIG.enabled}`);
+  res.json({ ok: true, provider: AI_CONFIG.provider, model: AI_CONFIG.model, baseUrl: AI_CONFIG.baseUrl, enabled: AI_CONFIG.enabled, hasApiKey: !!AI_CONFIG.apiKey });
 });
 
 // Settings — runtime config for epic children JQL, missing info criteria, prompt, etc.
@@ -765,13 +805,19 @@ app.get("/epic/:key", async (req, res) => {
       epic = { key: epicKey, summary: epicKey, description: "" };
     }
 
-    // Fetch all child tickets — uses compatible JQL (no "Epic Link" if unsupported)
-    const jql = buildEpicChildrenJql(epicKey);
+    // Fetch all child tickets — try combined JQL, fall back to parent-only if "Epic Link" unsupported
     const epicFieldsList = EPIC_LINK_FIELDS.join(",");
     const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,issuelinks,timetracking,${epicFieldsList},parent`;
 
-    // Paginate to get ALL children
-    const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
+    let data;
+    const jql = buildEpicChildrenJql(epicKey);
+    try {
+      data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
+    } catch {
+      // "Epic Link" clause may not be supported — fall back to parent-only
+      const fallbackJql = `parent = ${epicKey} ORDER BY status ASC, priority DESC`;
+      data = await jiraSearchAll(fallbackJql, fieldsStr, 100, "", req.query.serverId);
+    }
 
     const tickets = data.issues.map((issue) => {
       const comments = (issue.fields.comment?.comments || []).map((c) => ({
@@ -1651,27 +1697,21 @@ app.get("/hierarchy", async (req, res) => {
   }
 });
 
-// ─── Retro Collaboration (in-memory store, persisted per session) ──
+// ─── Retro Collaboration (in-memory) ──────
 
 let retroSessions = {};
 
 app.get("/retro/sessions", (req, res) => {
   const sessions = Object.values(retroSessions)
-    .map(({ id, title, createdAt, entries }) => ({
-      id, title, createdAt, entryCount: entries.length,
-    }))
+    .map(({ id, title, createdAt, entries }) => ({ id, title, createdAt, entryCount: entries.length }))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   res.json(sessions);
 });
 
 app.post("/retro/sessions", (req, res) => {
+  const title = req.body.title || `Retrospective ${new Date().toISOString().split("T")[0]}`;
   const id = `retro-${Date.now()}`;
-  const session = {
-    id,
-    title: req.body.title || `Retrospective ${new Date().toISOString().split("T")[0]}`,
-    createdAt: new Date().toISOString(),
-    entries: [],
-  };
+  const session = { id, title, createdAt: new Date().toISOString(), entries: [] };
   retroSessions[id] = session;
   res.json(session);
 });
@@ -1683,20 +1723,18 @@ app.get("/retro/sessions/:id", (req, res) => {
 });
 
 app.post("/retro/sessions/:id/entries", (req, res) => {
-  const session = retroSessions[req.params.id];
-  if (!session) return res.status(404).json({ error: "Session not found" });
-
   const { author, category, text } = req.body;
   if (!text || !category) return res.status(400).json({ error: "Missing text or category" });
 
   const entry = {
     id: `entry-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
     author: author || "Anonymous",
-    category, // "went_well" | "to_improve" | "action_item" | "question" | "shoutout"
-    text,
-    votes: 0,
+    category, text, votes: 0,
     createdAt: new Date().toISOString(),
   };
+
+  const session = retroSessions[req.params.id];
+  if (!session) return res.status(404).json({ error: "Session not found" });
   session.entries.push(entry);
   res.json(entry);
 });
@@ -1715,8 +1753,6 @@ app.delete("/retro/sessions/:id", (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── Multi-Team / PI Planning Endpoints ─────────────────
-
 // Helper: serialize server for API responses (no credentials)
 function serializeServers() {
   return JIRA_SERVERS.map((s) => ({
@@ -1731,11 +1767,8 @@ function configResponse() {
   return {
     servers: serializeServers(),
     teams: TEAMS,
-    piConfig: PI_CONFIG,
-    programBoard: { projectKey: PROGRAM_PROJECT, serverId: PROGRAM_SERVER_ID },
     defaultTeamId: DEFAULT_TEAM_ID,
     jqlBookmarks: JQL_BOOKMARKS,
-    disabledPiChecks: DISABLED_PI_CHECKS,
     configSource,
     needsSetup: needsSetup(),
   };
@@ -1747,7 +1780,7 @@ app.get("/config/status", (req, res) => {
   // Resolve default JQL: env var > default team's JQL > empty
   let resolvedDefaultJql = DEFAULT_JQL;
   if (!resolvedDefaultJql && DEFAULT_TEAM_ID) {
-    const team = TEAMS.find((t) => t.id === DEFAULT_TEAM_ID);
+    const team = TEAMS.find((tm) => tm.id === DEFAULT_TEAM_ID);
     if (team) resolvedDefaultJql = team.jql || (team.projectKey ? `project = ${team.projectKey} ORDER BY status ASC, updated DESC` : "");
   }
   res.json({
@@ -1799,7 +1832,7 @@ app.post("/config/test-connection", async (req, res) => {
   }
 });
 
-// Get configuration: servers, teams, PI
+// Get configuration: servers, teams
 app.get("/config", (req, res) => {
   res.json(configResponse());
 });
@@ -1807,11 +1840,6 @@ app.get("/config", (req, res) => {
 // Update configuration at runtime and persist to file
 app.post("/config", (req, res) => {
   if (req.body.teams) TEAMS = req.body.teams;
-  if (req.body.piConfig) PI_CONFIG = { ...PI_CONFIG, ...req.body.piConfig };
-  if (req.body.programBoard) {
-    if (req.body.programBoard.projectKey !== undefined) PROGRAM_PROJECT = req.body.programBoard.projectKey;
-    if (req.body.programBoard.serverId !== undefined) PROGRAM_SERVER_ID = req.body.programBoard.serverId;
-  }
   if (req.body.servers) {
     for (const update of req.body.servers) {
       const existing = JIRA_SERVERS.find((s) => s.id === update.id);
@@ -1837,7 +1865,6 @@ app.post("/config", (req, res) => {
   }
   if (req.body.defaultTeamId !== undefined) DEFAULT_TEAM_ID = req.body.defaultTeamId;
   if (req.body.jqlBookmarks) JQL_BOOKMARKS = req.body.jqlBookmarks;
-  if (req.body.disabledPiChecks) DISABLED_PI_CHECKS = req.body.disabledPiChecks;
   // Delete servers by id
   if (req.body.deleteServerIds && Array.isArray(req.body.deleteServerIds)) {
     const referencedServerIds = new Set(TEAMS.map((t) => t.serverId));
@@ -1859,12 +1886,8 @@ app.post("/config/import", (req, res) => {
     }
     if (data.servers && Array.isArray(data.servers)) JIRA_SERVERS = data.servers;
     if (data.teams && Array.isArray(data.teams)) TEAMS = data.teams;
-    if (data.piConfig) PI_CONFIG = { ...PI_CONFIG, ...data.piConfig };
-    if (data.programProject !== undefined) PROGRAM_PROJECT = data.programProject;
-    if (data.programServerId !== undefined) PROGRAM_SERVER_ID = data.programServerId;
     if (data.defaultTeamId !== undefined) DEFAULT_TEAM_ID = data.defaultTeamId;
     if (data.jqlBookmarks && Array.isArray(data.jqlBookmarks)) JQL_BOOKMARKS = data.jqlBookmarks;
-    if (data.disabledPiChecks && Array.isArray(data.disabledPiChecks)) DISABLED_PI_CHECKS = data.disabledPiChecks;
     configSource = "file";
     saveConfigToFile();
     res.json({ ok: true, ...configResponse() });
@@ -1879,18 +1902,7 @@ app.post("/config/reset", (req, res) => {
   // Re-parse from env vars
   try { JIRA_SERVERS = JSON.parse(process.env.JIRA_SERVERS || "[]"); } catch { JIRA_SERVERS = []; }
   try { TEAMS = JSON.parse(process.env.TEAMS || "[]"); } catch { TEAMS = []; }
-  PI_CONFIG = {
-    name: process.env.PI_NAME || "",
-    startDate: process.env.PI_START_DATE || "",
-    endDate: process.env.PI_END_DATE || "",
-    sprintCount: parseInt(process.env.PI_SPRINT_COUNT) || 5,
-    sprintDuration: parseInt(process.env.PI_SPRINT_DURATION) || 14,
-    enabled: !!(process.env.PI_START_DATE && process.env.PI_END_DATE),
-  };
-  PROGRAM_PROJECT = process.env.PROGRAM_PROJECT || "";
-  PROGRAM_SERVER_ID = process.env.PROGRAM_SERVER_ID || "primary";
   JQL_BOOKMARKS = [];
-  DISABLED_PI_CHECKS = [];
   if (JIRA_SERVERS.length === 0 && JIRA_API_TOKEN) {
     JIRA_SERVERS.push({
       id: "primary", name: "Primary Jira", url: JIRA_BASE_URL,
@@ -1951,640 +1963,7 @@ app.get("/quick-queries", (req, res) => {
   res.json({ projects, teams, bookmarks: JQL_BOOKMARKS });
 });
 
-// PI Planning: aggregate all teams' data
-app.get("/pi/overview", async (req, res) => {
-  try {
-    const epicFields = EPIC_LINK_FIELDS.join(",");
-    const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged,issuelinks`;
-    const now = Date.now();
 
-    // Build PI date filter if configured and enabled
-    const piStart = PI_CONFIG.enabled !== false ? PI_CONFIG.startDate : "";
-    const piEnd = PI_CONFIG.enabled !== false ? PI_CONFIG.endDate : "";
-    // Filter modes: "pi" (default when dates set), "all", "sprint"
-    const filterMode = req.query.filter || (piStart && piEnd ? "pi" : "all");
-    const sprintName = req.query.sprint || null;
-
-    const teamResults = [];
-
-    for (const team of TEAMS) {
-      const server = getServer(team.serverId);
-      // Default JQL: use per-team jql config, else project-based fallback
-      const defaultJql = team.jql || `project = ${team.projectKey} ORDER BY status ASC, updated DESC`;
-      let teamJql;
-      if (req.query.jql) {
-        teamJql = req.query.jql.replace(/\{PROJECT\}/g, team.projectKey);
-      } else {
-        teamJql = defaultJql;
-      }
-
-      try {
-        const data = await jiraSearchAllFrom(server, teamJql, fieldsStr);
-
-        const issues = data.issues.map((issue) => {
-          const mapped = {
-            key: issue.key,
-            summary: issue.fields.summary,
-            status: issue.fields.status?.name,
-            statusCategory: issue.fields.status?.statusCategory?.key,
-            assigneeName: issue.fields.assignee?.displayName || null,
-            priority: issue.fields.priority?.name,
-            issueType: issue.fields.issuetype?.name,
-            labels: issue.fields.labels || [],
-            created: issue.fields.created,
-            updated: issue.fields.updated,
-            dueDate: issue.fields.duedate || null,
-            epicKey: getEpicKey(issue.fields),
-            parentKey: issue.fields.parent?.key || null,
-            originalEstimate: issue.fields.timetracking?.originalEstimate || null,
-            commentCount: issue.fields.comment?.total || 0,
-            daysSinceUpdate: daysSince(issue.fields.updated),
-            teamId: team.id,
-            serverId: team.serverId,
-            serverUrl: getBrowserUrl(server),
-            // Cross-team links
-            linkedIssues: (issue.fields.issuelinks || []).map((link) => ({
-              type: link.type?.name,
-              direction: link.inwardIssue ? "inward" : "outward",
-              key: link.inwardIssue?.key || link.outwardIssue?.key,
-              summary: link.inwardIssue?.fields?.summary || link.outwardIssue?.fields?.summary,
-              status: link.inwardIssue?.fields?.status?.name || link.outwardIssue?.fields?.status?.name,
-            })),
-          };
-          mapped.urgencyFlags = computeUrgency(mapped);
-          return mapped;
-        });
-
-        const total = issues.length;
-        const done = issues.filter((i) => i.statusCategory === "done").length;
-        const inProgress = issues.filter((i) => i.statusCategory === "indeterminate").length;
-        const todo = total - done - inProgress;
-        const overdue = issues.filter((i) =>
-          i.dueDate && new Date(i.dueDate).getTime() < now && i.statusCategory !== "done"
-        ).length;
-        const blocked = issues.filter((i) =>
-          (i.labels || []).some((l) => l.toLowerCase().includes("block"))
-        ).length;
-
-        // Find epics
-        const epics = {};
-        for (const issue of issues) {
-          if (issue.issueType === "Epic") {
-            epics[issue.key] = { ...issue, children: [] };
-          }
-        }
-        for (const issue of issues) {
-          if (issue.epicKey && epics[issue.epicKey]) {
-            epics[issue.epicKey].children.push(issue);
-          }
-        }
-
-        const epicList = Object.values(epics).map((epic) => {
-          const childTotal = epic.children.length;
-          const childDone = epic.children.filter((c) => c.statusCategory === "done").length;
-          return {
-            key: epic.key,
-            summary: epic.summary,
-            status: epic.status,
-            statusCategory: epic.statusCategory,
-            dueDate: epic.dueDate,
-            assigneeName: epic.assigneeName,
-            progress: childTotal > 0 ? Math.round((childDone / childTotal) * 100) : 0,
-            childCount: childTotal,
-            childDone,
-          };
-        });
-
-        // Cross-team dependencies
-        const crossTeamDeps = [];
-        for (const issue of issues) {
-          for (const link of issue.linkedIssues || []) {
-            if (link.key && !issues.some((i) => i.key === link.key)) {
-              crossTeamDeps.push({
-                fromKey: issue.key,
-                fromSummary: issue.summary,
-                fromTeam: team.id,
-                toKey: link.key,
-                toSummary: link.summary,
-                linkType: link.type,
-                direction: link.direction,
-                toStatus: link.status,
-              });
-            }
-          }
-        }
-
-        teamResults.push({
-          team: { id: team.id, name: team.name, color: team.color, projectKey: team.projectKey, jql: team.jql || "", serverUrl: getBrowserUrl(server) },
-          stats: { total, done, inProgress, todo, overdue, blocked },
-          progress: total > 0 ? Math.round((done / total) * 100) : 0,
-          epics: epicList,
-          issues,
-          crossTeamDeps,
-          jqlUsed: teamJql,
-        });
-      } catch (err) {
-        teamResults.push({
-          team: { id: team.id, name: team.name, color: team.color, projectKey: team.projectKey, jql: team.jql || "", serverUrl: getBrowserUrl(server) },
-          error: err.message,
-          stats: { total: 0, done: 0, inProgress: 0, todo: 0, overdue: 0, blocked: 0 },
-          progress: 0,
-          epics: [],
-          issues: [],
-          crossTeamDeps: [],
-        });
-      }
-    }
-
-    // Aggregate all cross-team dependencies
-    const allCrossTeamDeps = teamResults.flatMap((t) => t.crossTeamDeps);
-
-    // Detect bidirectional dependencies
-    const depPairs = [];
-    for (const dep of allCrossTeamDeps) {
-      const reverse = allCrossTeamDeps.find(
-        (d) => d.fromKey === dep.toKey && d.toKey === dep.fromKey
-      );
-      if (reverse && !depPairs.some((p) =>
-        (p.a === dep.fromKey && p.b === dep.toKey) || (p.a === dep.toKey && p.b === dep.fromKey)
-      )) {
-        depPairs.push({ a: dep.fromKey, b: dep.toKey, bidirectional: true });
-      }
-    }
-
-    // PI-level stats
-    const allIssues = teamResults.flatMap((t) => t.issues);
-    const totalIssues = allIssues.length;
-    const totalDone = allIssues.filter((i) => i.statusCategory === "done").length;
-
-    // Agile coach warnings for PI
-    const piWarnings = [];
-
-    // Check for unbalanced teams
-    const teamSizes = teamResults.map((t) => t.stats.total);
-    const avgTeamSize = teamSizes.reduce((a, b) => a + b, 0) / teamSizes.length;
-    const unbalanced = teamResults.filter(
-      (t) => t.stats.total > avgTeamSize * 2 || (t.stats.total < avgTeamSize * 0.3 && t.stats.total > 0)
-    );
-    if (unbalanced.length > 0 && teamResults.length > 1) {
-      piWarnings.push({
-        severity: "warning",
-        title: "Unbalanced workload across teams",
-        detail: `Average tickets per team: ${Math.round(avgTeamSize)}. ${unbalanced.map(
-          (t) => `${t.team.name}: ${t.stats.total}`
-        ).join(", ")} are significantly different.`,
-        category: "workload",
-      });
-    }
-
-    // Cross-team dependency risks
-    if (allCrossTeamDeps.length > 10) {
-      piWarnings.push({
-        severity: "warning",
-        title: `${allCrossTeamDeps.length} cross-team dependencies detected`,
-        detail: "High number of cross-team dependencies increases coordination overhead. Consider decoupling work or scheduling sync meetings.",
-        category: "dependencies",
-      });
-    }
-
-    // Teams with high overdue
-    const overdueTeams = teamResults.filter(
-      (t) => t.stats.overdue > 0 && t.stats.overdue / Math.max(t.stats.total, 1) > 0.2
-    );
-    if (overdueTeams.length > 0) {
-      piWarnings.push({
-        severity: "critical",
-        title: `${overdueTeams.length} team(s) with >20% overdue tickets`,
-        detail: overdueTeams.map((t) => `${t.team.name}: ${t.stats.overdue}/${t.stats.total} overdue`).join(", "),
-        category: "delivery",
-      });
-    }
-
-    // Blocked tickets across PI
-    const totalBlocked = teamResults.reduce((sum, t) => sum + t.stats.blocked, 0);
-    if (totalBlocked > 0) {
-      piWarnings.push({
-        severity: totalBlocked > 5 ? "critical" : "warning",
-        title: `${totalBlocked} blocked ticket(s) across the PI`,
-        detail: "Blocked tickets are the highest priority to unblock. Escalate to remove impediments.",
-        category: "blockers",
-      });
-    }
-
-    res.json({
-      piConfig: PI_CONFIG,
-      filterMode,
-      teams: teamResults.map(({ issues, ...rest }) => rest), // exclude raw issues for overview
-      piStats: {
-        totalTeams: teamResults.length,
-        totalIssues,
-        totalDone,
-        progress: totalIssues > 0 ? Math.round((totalDone / totalIssues) * 100) : 0,
-        totalCrossTeamDeps: allCrossTeamDeps.length,
-      },
-      crossTeamDeps: allCrossTeamDeps,
-      bidirectionalDeps: depPairs,
-      piWarnings,
-    });
-  } catch (err) {
-    console.error("Error fetching PI overview:", err.message);
-    res.status(500).json(errorResponse(req, err));
-  }
-});
-
-// Single team detail within PI
-app.get("/pi/team/:teamId", async (req, res) => {
-  try {
-    const team = TEAMS.find((t) => t.id === req.params.teamId);
-    if (!team) return res.status(404).json({ error: "Team not found" });
-
-    const server = getServer(team.serverId);
-    const jql = req.query.jql || team.jql || `project = ${team.projectKey} ORDER BY status ASC, updated DESC`;
-    const epicFields = EPIC_LINK_FIELDS.join(",");
-    const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged,issuelinks`;
-
-    const data = await jiraSearchAllFrom(server, jql, fieldsStr);
-
-    const issues = data.issues.map((issue) => {
-      const lastComment = issue.fields.comment?.comments?.slice(-1)[0];
-      const mapped = {
-        key: issue.key,
-        summary: issue.fields.summary,
-        status: issue.fields.status?.name,
-        statusCategory: issue.fields.status?.statusCategory?.key,
-        assigneeName: issue.fields.assignee?.displayName || null,
-        priority: issue.fields.priority?.name,
-        issueType: issue.fields.issuetype?.name,
-        labels: issue.fields.labels || [],
-        created: issue.fields.created,
-        updated: issue.fields.updated,
-        dueDate: issue.fields.duedate || null,
-        epicKey: getEpicKey(issue.fields),
-        parentKey: issue.fields.parent?.key || null,
-        originalEstimate: issue.fields.timetracking?.originalEstimate || null,
-        commentCount: issue.fields.comment?.total || 0,
-        daysSinceUpdate: daysSince(issue.fields.updated),
-        lastComment: lastComment
-          ? { author: lastComment.author?.displayName, body: lastComment.body?.substring(0, 300), date: lastComment.updated || lastComment.created }
-          : null,
-        linkedIssues: (issue.fields.issuelinks || []).map((link) => ({
-          type: link.type?.name,
-          direction: link.inwardIssue ? "inward" : "outward",
-          key: link.inwardIssue?.key || link.outwardIssue?.key,
-          summary: link.inwardIssue?.fields?.summary || link.outwardIssue?.fields?.summary,
-          status: link.inwardIssue?.fields?.status?.name || link.outwardIssue?.fields?.status?.name,
-        })),
-      };
-      mapped.urgencyFlags = computeUrgency(mapped);
-      return mapped;
-    });
-
-    res.json({
-      team,
-      server: { id: server.id, name: server.name, url: server.url },
-      total: data.total,
-      issues,
-    });
-  } catch (err) {
-    console.error("Error fetching team data:", err.message);
-    res.status(500).json(errorResponse(req, err));
-  }
-});
-
-// Cross-team follow-up tracker: find all linked issues across team boundaries
-app.get("/pi/follow-ups", async (req, res) => {
-  try {
-    const epicFields = EPIC_LINK_FIELDS.join(",");
-    const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,issuetype,labels,issuelinks`;
-
-    const allFollowUps = [];
-    for (const team of TEAMS) {
-      const server = getServer(team.serverId);
-      // Use per-team JQL if configured, else project-based
-      const baseJql = team.jql || `project = ${team.projectKey} ORDER BY priority DESC, updated DESC`;
-      const fallbackJql = baseJql;
-
-      let data;
-      try {
-        data = await jiraSearchAllFrom(server, fallbackJql, fieldsStr);
-      } catch {
-        data = { issues: [] };
-      }
-
-      for (const issue of data.issues) {
-        const links = (issue.fields.issuelinks || []);
-        const externalLinks = links.filter((link) => {
-          const linkedKey = link.inwardIssue?.key || link.outwardIssue?.key || "";
-          const linkedProject = linkedKey.split("-")[0];
-          return linkedProject && linkedProject !== team.projectKey;
-        });
-
-        if (externalLinks.length > 0) {
-          allFollowUps.push({
-            key: issue.key,
-            summary: issue.fields.summary,
-            status: issue.fields.status?.name,
-            statusCategory: issue.fields.status?.statusCategory?.key,
-            assigneeName: issue.fields.assignee?.displayName || null,
-            priority: issue.fields.priority?.name,
-            issueType: issue.fields.issuetype?.name,
-            dueDate: issue.fields.duedate,
-            teamId: team.id,
-            teamName: team.name,
-            serverUrl: getBrowserUrl(server),
-            externalLinks: externalLinks.map((link) => ({
-              type: link.type?.name,
-              direction: link.inwardIssue ? "inward" : "outward",
-              key: link.inwardIssue?.key || link.outwardIssue?.key,
-              summary: link.inwardIssue?.fields?.summary || link.outwardIssue?.fields?.summary,
-              status: link.inwardIssue?.fields?.status?.name || link.outwardIssue?.fields?.status?.name,
-            })),
-          });
-        }
-      }
-    }
-
-    res.json({
-      followUps: allFollowUps,
-      total: allFollowUps.length,
-    });
-  } catch (err) {
-    console.error("Error fetching follow-ups:", err.message);
-    res.status(500).json(errorResponse(req, err));
-  }
-});
-
-// ─── Program Board: parent project with high-level Features ──
-// Maps program-level Features to team-level implementations via Jira issue links.
-// The program board holds the "what" (Features/Capabilities), teams hold the "how" (Stories/Tasks).
-
-app.get("/pi/program-board", async (req, res) => {
-  try {
-    const projectKey = req.query.project || PROGRAM_PROJECT;
-    if (!projectKey) {
-      return res.json({
-        configured: false,
-        message: "No program board project configured. Set PROGRAM_PROJECT in .env or configure via Settings.",
-        features: [],
-        stats: {},
-        warnings: [],
-      });
-    }
-
-    const serverId = req.query.serverId || PROGRAM_SERVER_ID;
-    const server = getServer(serverId);
-    const epicFields = EPIC_LINK_FIELDS.join(",");
-    const fieldsStr = `summary,status,assignee,priority,updated,created,duedate,description,issuetype,labels,comment,${epicFields},parent,timetracking,flagged,issuelinks`;
-
-    // Apply PI date filter if configured and enabled
-    const piStart = PI_CONFIG.enabled !== false ? PI_CONFIG.startDate : "";
-    const piEnd = PI_CONFIG.enabled !== false ? PI_CONFIG.endDate : "";
-    const filterMode = req.query.filter || (piStart && piEnd ? "pi" : "all");
-
-    let jql;
-    if (filterMode === "pi" && piStart && piEnd) {
-      jql = `project = ${projectKey} AND (created >= "${piStart}" OR updated >= "${piStart}" OR statusCategory != Done) ORDER BY priority DESC, status ASC, updated DESC`;
-    } else {
-      jql = `project = ${projectKey} ORDER BY priority DESC, status ASC, updated DESC`;
-    }
-    const data = await jiraSearchAllFrom(server, jql, fieldsStr);
-    const now = Date.now();
-
-    // Map all program issues
-    const allIssues = data.issues.map((issue) => {
-      const mapped = {
-        key: issue.key,
-        summary: issue.fields.summary,
-        description: (issue.fields.description || "").substring(0, 500),
-        status: issue.fields.status?.name,
-        statusCategory: issue.fields.status?.statusCategory?.key,
-        assigneeName: issue.fields.assignee?.displayName || null,
-        priority: issue.fields.priority?.name,
-        issueType: issue.fields.issuetype?.name,
-        labels: issue.fields.labels || [],
-        created: issue.fields.created,
-        updated: issue.fields.updated,
-        dueDate: issue.fields.duedate || null,
-        epicKey: getEpicKey(issue.fields),
-        parentKey: issue.fields.parent?.key || null,
-        commentCount: issue.fields.comment?.total || 0,
-        daysSinceUpdate: daysSince(issue.fields.updated),
-        linkedIssues: (issue.fields.issuelinks || []).map((link) => ({
-          type: link.type?.name,
-          direction: link.inwardIssue ? "inward" : "outward",
-          key: link.inwardIssue?.key || link.outwardIssue?.key,
-          summary: link.inwardIssue?.fields?.summary || link.outwardIssue?.fields?.summary,
-          status: link.inwardIssue?.fields?.status?.name || link.outwardIssue?.fields?.status?.name,
-          statusCategory: link.inwardIssue?.fields?.status?.statusCategory?.key || link.outwardIssue?.fields?.status?.statusCategory?.key,
-          issueType: link.inwardIssue?.fields?.issuetype?.name || link.outwardIssue?.fields?.issuetype?.name,
-        })),
-      };
-      mapped.urgencyFlags = computeUrgency(mapped);
-      return mapped;
-    });
-
-    // Separate epics (Features) and their children
-    const epics = {};
-    const nonEpics = [];
-    for (const issue of allIssues) {
-      if (issue.issueType === "Epic") {
-        epics[issue.key] = { ...issue, children: [] };
-      } else {
-        nonEpics.push(issue);
-      }
-    }
-    for (const issue of nonEpics) {
-      if (issue.epicKey && epics[issue.epicKey]) {
-        epics[issue.epicKey].children.push(issue);
-      }
-    }
-
-    // For each feature (epic or top-level story), find team implementations via issue links
-    const features = [];
-    const featureSources = Object.values(epics).length > 0
-      ? Object.values(epics)
-      : allIssues.filter((i) => !i.parentKey && !i.epicKey); // fallback: top-level issues
-
-    for (const feature of featureSources) {
-      // Collect all linked issues from this feature AND its children
-      const allLinked = [...(feature.linkedIssues || [])];
-      for (const child of feature.children || []) {
-        for (const link of child.linkedIssues || []) {
-          allLinked.push({ ...link, fromChild: child.key });
-        }
-      }
-
-      // Group linked issues by team project
-      const teamImplementations = {};
-      for (const link of allLinked) {
-        if (!link.key) continue;
-        const linkedProject = link.key.split("-")[0];
-        // Skip links back to the same program project
-        if (linkedProject === projectKey) continue;
-
-        // Find which team owns this project
-        const team = TEAMS.find((t) => t.projectKey === linkedProject);
-        const teamId = team?.id || linkedProject.toLowerCase();
-        const teamName = team?.name || linkedProject;
-        const teamColor = team?.color || "#6B7280";
-
-        if (!teamImplementations[teamId]) {
-          teamImplementations[teamId] = {
-            teamId,
-            teamName,
-            teamColor,
-            projectKey: linkedProject,
-            issues: [],
-          };
-        }
-        teamImplementations[teamId].issues.push({
-          key: link.key,
-          summary: link.summary,
-          status: link.status,
-          statusCategory: link.statusCategory,
-          issueType: link.issueType,
-          linkType: link.type,
-          direction: link.direction,
-          fromChild: link.fromChild || null,
-        });
-      }
-
-      // Compute progress across all team implementations
-      const allTeamIssues = Object.values(teamImplementations).flatMap((t) => t.issues);
-      const implTotal = allTeamIssues.length;
-      const implDone = allTeamIssues.filter((i) => i.statusCategory === "done").length;
-      const implInProgress = allTeamIssues.filter((i) => i.statusCategory === "indeterminate").length;
-
-      // Also count children progress within the program board itself
-      const childTotal = (feature.children || []).length;
-      const childDone = (feature.children || []).filter((c) => c.statusCategory === "done").length;
-
-      features.push({
-        key: feature.key,
-        summary: feature.summary,
-        description: feature.description,
-        status: feature.status,
-        statusCategory: feature.statusCategory,
-        priority: feature.priority,
-        assigneeName: feature.assigneeName,
-        dueDate: feature.dueDate,
-        labels: feature.labels,
-        childCount: childTotal,
-        childDone,
-        teamImplementations: Object.values(teamImplementations),
-        implementationStats: {
-          total: implTotal,
-          done: implDone,
-          inProgress: implInProgress,
-          todo: implTotal - implDone - implInProgress,
-          progress: implTotal > 0 ? Math.round((implDone / implTotal) * 100) : 0,
-        },
-        // Overall progress: combine program children + team implementations
-        overallProgress: (() => {
-          const total = childTotal + implTotal;
-          const done = childDone + implDone;
-          return total > 0 ? Math.round((done / total) * 100) : 0;
-        })(),
-        warnings: [],
-      });
-    }
-
-    // Add warnings per feature
-    for (const feature of features) {
-      if (feature.teamImplementations.length === 0 && feature.statusCategory !== "done") {
-        feature.warnings.push({
-          severity: "warning",
-          message: `Feature "${feature.summary}" has no linked team implementations. Teams may not be aware of this requirement.`,
-        });
-      }
-      if (feature.dueDate && new Date(feature.dueDate).getTime() < now && feature.statusCategory !== "done") {
-        feature.warnings.push({
-          severity: "critical",
-          message: `Feature "${feature.summary}" is overdue (due ${feature.dueDate}).`,
-        });
-      }
-      if (feature.implementationStats.total > 0 && feature.implementationStats.progress < 25 && feature.statusCategory !== "new") {
-        feature.warnings.push({
-          severity: "warning",
-          message: `Feature "${feature.summary}" is ${feature.status} but team implementations are only ${feature.implementationStats.progress}% done.`,
-        });
-      }
-    }
-
-    // Aggregate stats
-    const totalFeatures = features.length;
-    const featuresWithTeams = features.filter((f) => f.teamImplementations.length > 0).length;
-    const featuresOrphaned = totalFeatures - featuresWithTeams;
-    const avgProgress = features.length > 0
-      ? Math.round(features.reduce((sum, f) => sum + f.overallProgress, 0) / features.length)
-      : 0;
-    const featuresDone = features.filter((f) => f.statusCategory === "done").length;
-
-    // Team coverage: which teams are implementing features
-    const teamCoverage = {};
-    for (const feature of features) {
-      for (const impl of feature.teamImplementations) {
-        if (!teamCoverage[impl.teamId]) {
-          teamCoverage[impl.teamId] = { teamId: impl.teamId, teamName: impl.teamName, teamColor: impl.teamColor, featureCount: 0, issueCount: 0, doneCount: 0 };
-        }
-        teamCoverage[impl.teamId].featureCount++;
-        teamCoverage[impl.teamId].issueCount += impl.issues.length;
-        teamCoverage[impl.teamId].doneCount += impl.issues.filter((i) => i.statusCategory === "done").length;
-      }
-    }
-
-    // Program-level warnings
-    const warnings = [];
-    if (featuresOrphaned > 0) {
-      warnings.push({
-        severity: featuresOrphaned > totalFeatures * 0.3 ? "critical" : "warning",
-        title: `${featuresOrphaned} feature(s) without team implementations`,
-        detail: "These features have no linked issues in team boards. Teams may not know about these requirements. Link team stories/tasks to program features.",
-        category: "traceability",
-      });
-    }
-
-    const teamsWithNoFeatures = TEAMS.filter((t) => !teamCoverage[t.id] && t.projectKey !== projectKey);
-    if (teamsWithNoFeatures.length > 0) {
-      warnings.push({
-        severity: "warning",
-        title: `${teamsWithNoFeatures.length} team(s) with no linked program features`,
-        detail: `Teams not linked to any program feature: ${teamsWithNoFeatures.map((t) => t.name).join(", ")}. Ensure all teams have traceability back to program objectives.`,
-        category: "coverage",
-      });
-    }
-
-    const overdueFeatures = features.filter((f) => f.dueDate && new Date(f.dueDate).getTime() < now && f.statusCategory !== "done");
-    if (overdueFeatures.length > 0) {
-      warnings.push({
-        severity: "critical",
-        title: `${overdueFeatures.length} overdue program feature(s)`,
-        detail: overdueFeatures.map((f) => `${f.key}: ${f.summary}`).join("; "),
-        category: "delivery",
-      });
-    }
-
-    res.json({
-      configured: true,
-      projectKey,
-      serverUrl: getBrowserUrl(server),
-      features,
-      stats: {
-        totalFeatures,
-        featuresDone,
-        featuresWithTeams,
-        featuresOrphaned,
-        avgProgress,
-        totalTeamIssues: Object.values(teamCoverage).reduce((sum, t) => sum + t.issueCount, 0),
-      },
-      teamCoverage: Object.values(teamCoverage),
-      warnings,
-    });
-  } catch (err) {
-    console.error("Error fetching program board:", err.message);
-    res.status(500).json(errorResponse(req, err));
-  }
-});
 
 // ─── Compliance: Per-Project Agile Health ─────────────────
 app.get("/compliance/projects", async (req, res) => {
@@ -3147,396 +2526,6 @@ app.get("/compliance/projects", async (req, res) => {
   }
 });
 
-// ─── Compliance: PI Planning Cross-Project Health ─────────
-app.get("/compliance/pi", async (req, res) => {
-  try {
-    const FIELDS = "summary,status,issuetype,priority,assignee,created,updated,duedate,description,issuelinks," +
-      (EPIC_LINK_FIELDS.join(",") || "customfield_10014") + ",labels,components";
-    const NOW = Date.now();
-    const DAY = 86400000;
-    const checks = [];
-
-    // Gather all team data
-    const teamDataMap = {};
-    let allIssues = [];
-    let allCrossTeamDeps = [];
-
-    await Promise.all(TEAMS.map(async (team) => {
-      const server = getServer(team.serverId);
-      const userJql = req.query.jql;
-      let baseJql = team.jql || `project = ${team.projectKey}`;
-      const jql = userJql ? `(${baseJql}) AND (${stripOrderBy(userJql)}) ORDER BY status ASC, updated DESC` : `${baseJql} ORDER BY status ASC, updated DESC`;
-      try {
-        const data = await jiraSearchAllFrom(server, jql, FIELDS);
-        teamDataMap[team.id] = { team, server, issues: data.issues };
-        allIssues = allIssues.concat(data.issues);
-
-        // Detect cross-team deps
-        data.issues.forEach((issue) => {
-          (issue.fields.issuelinks || []).forEach((link) => {
-            const linked = link.outwardIssue || link.inwardIssue;
-            if (!linked) return;
-            const linkedProject = linked.key.split("-")[0];
-            if (linkedProject !== team.projectKey) {
-              allCrossTeamDeps.push({
-                fromTeam: team.id,
-                fromKey: issue.key,
-                toKey: linked.key,
-                toProject: linkedProject,
-                linkType: link.type?.name || "relates",
-              });
-            }
-          });
-        });
-      } catch {
-        teamDataMap[team.id] = { team, server, issues: [] };
-      }
-    }));
-
-    // Fetch program board data if configured
-    let programFeatures = [];
-    let programServer = null;
-    if (PROGRAM_PROJECT) {
-      programServer = getServer(PROGRAM_SERVER_ID);
-      try {
-        const progData = await jiraSearchAllFrom(programServer,
-          `project = ${PROGRAM_PROJECT} ORDER BY priority DESC`, FIELDS + ",issuelinks");
-        programFeatures = progData.issues;
-      } catch {}
-    }
-
-    // ── CHECK 1: Program Feature Traceability (15 pts)
-    if (PROGRAM_PROJECT && programFeatures.length > 0) {
-      const featuresWithLinks = programFeatures.filter((f) => {
-        const links = f.fields.issuelinks || [];
-        return links.some((l) => {
-          const linked = l.outwardIssue || l.inwardIssue;
-          if (!linked) return false;
-          const proj = linked.key.split("-")[0];
-          return proj !== PROGRAM_PROJECT;
-        });
-      });
-      const tracePct = Math.round((featuresWithLinks.length / programFeatures.length) * 100);
-      const traceScore = Math.round((tracePct / 100) * 15);
-      const orphanFeatures = programFeatures.filter((f) => !featuresWithLinks.includes(f)).slice(0, 5);
-      checks.push({
-        id: "feature-traceability", name: "Program Feature → Team Traceability", score: traceScore, maxScore: 15,
-        status: traceScore >= 12 ? "pass" : traceScore >= 8 ? "warning" : "fail",
-        description: `${tracePct}% of program features (${featuresWithLinks.length}/${programFeatures.length}) are linked to team implementations. Every program feature MUST have at least one team story/task linked. Orphaned features mean teams may not know about requirements.`,
-        detail: `${programFeatures.length - featuresWithLinks.length} features have no team links.`,
-        action: orphanFeatures.length > 0 ? { label: "Link features to teams", keys: orphanFeatures.map((f) => f.key), serverUrl: getBrowserUrl(programServer) } : null,
-      });
-    } else {
-      checks.push({
-        id: "feature-traceability", name: "Program Feature → Team Traceability", score: 0, maxScore: 15,
-        status: PROGRAM_PROJECT ? "fail" : "warning",
-        description: PROGRAM_PROJECT
-          ? "No program features found. Create Features/Epics in the program project to track high-level requirements that flow down to team boards."
-          : "Program Board not configured. Set PROGRAM_PROJECT to enable feature-to-team traceability tracking. This is critical for SAFe PI planning.",
-        detail: PROGRAM_PROJECT ? "0 features in program project." : "PROGRAM_PROJECT not set.",
-        action: null,
-      });
-    }
-
-    // ── CHECK 2: Cross-Team Dependency Coverage (15 pts)
-    const uniqueDeps = new Map();
-    allCrossTeamDeps.forEach((d) => {
-      const key = [d.fromKey, d.toKey].sort().join(":");
-      if (!uniqueDeps.has(key)) uniqueDeps.set(key, d);
-    });
-    const depCount = uniqueDeps.size;
-    const teamsWithDeps = new Set(allCrossTeamDeps.map((d) => d.fromTeam));
-    // Good if deps exist AND are documented (linked)
-    const depDocScore = TEAMS.length > 1
-      ? (depCount > 0 ? Math.min(15, Math.round((depCount / (TEAMS.length * 2)) * 15)) : 5)
-      : 15;
-    checks.push({
-      id: "dependency-tracking", name: "Cross-Team Dependency Tracking", score: depDocScore, maxScore: 15,
-      status: depDocScore >= 12 ? "pass" : depDocScore >= 8 ? "warning" : "fail",
-      description: `${depCount} cross-team dependencies tracked across ${teamsWithDeps.size} teams. Dependencies are the #1 cause of PI delivery failure. Every inter-team handoff must be an explicit Jira issue link so it appears on the dependency board.`,
-      detail: `${depCount} unique cross-team links found. ${TEAMS.length - teamsWithDeps.size} team(s) have zero tracked dependencies.`,
-      action: null,
-    });
-
-    // ── CHECK 3: Bidirectional Dependency Risk (10 pts)
-    const depPairs = {};
-    allCrossTeamDeps.forEach((d) => {
-      const k1 = `${d.fromKey}:${d.toKey}`;
-      const k2 = `${d.toKey}:${d.fromKey}`;
-      if (depPairs[k2]) depPairs[k2].bidir = true;
-      else depPairs[k1] = { ...d, bidir: false };
-    });
-    const bidirCount = Object.values(depPairs).filter((d) => d.bidir).length;
-    const bidirScore = bidirCount === 0 ? 10 : bidirCount <= 2 ? 6 : bidirCount <= 5 ? 3 : 0;
-    checks.push({
-      id: "bidirectional-deps", name: "No Circular Dependencies", score: bidirScore, maxScore: 10,
-      status: bidirScore >= 8 ? "pass" : bidirScore >= 5 ? "warning" : "fail",
-      description: `${bidirCount} bidirectional (circular) dependencies found. Circular dependencies create deadlocks where neither team can progress. Resolve by: breaking the cycle, introducing a shared service, or sequencing the work.`,
-      detail: bidirCount > 0 ? `${bidirCount} ticket pairs block each other in both directions.` : "No circular dependencies detected.",
-      action: null,
-    });
-
-    // ── CHECK 4: Team Workload Balance (10 pts)
-    const teamSizes = TEAMS.map((t) => teamDataMap[t.id]?.issues.length || 0);
-    const avgSize = teamSizes.reduce((a, b) => a + b, 0) / Math.max(teamSizes.length, 1);
-    const maxDeviation = avgSize > 0 ? Math.max(...teamSizes.map((s) => Math.abs(s - avgSize) / avgSize)) : 0;
-    const balanceScore = maxDeviation <= 0.3 ? 10 : maxDeviation <= 0.5 ? 7 : maxDeviation <= 0.8 ? 4 : 1;
-    const overloaded = TEAMS.filter((t) => (teamDataMap[t.id]?.issues.length || 0) > avgSize * 1.5).map((t) => t.name);
-    const underloaded = TEAMS.filter((t) => (teamDataMap[t.id]?.issues.length || 0) < avgSize * 0.5 && (teamDataMap[t.id]?.issues.length || 0) > 0).map((t) => t.name);
-    checks.push({
-      id: "workload-balance", name: "Team Workload Balance", score: balanceScore, maxScore: 10,
-      status: balanceScore >= 8 ? "pass" : balanceScore >= 5 ? "warning" : "fail",
-      description: `Team workload deviation: ${Math.round(maxDeviation * 100)}%. Balanced teams deliver more predictably. If one team is overloaded, redistribute scope or add capacity. Review in PI planning.`,
-      detail: TEAMS.map((t) => `${t.name}: ${teamDataMap[t.id]?.issues.length || 0} issues`).join(", ") +
-        (overloaded.length > 0 ? ` | Overloaded: ${overloaded.join(", ")}` : "") +
-        (underloaded.length > 0 ? ` | Underloaded: ${underloaded.join(", ")}` : ""),
-      action: null,
-    });
-
-    // ── CHECK 5: Cross-Team Stale Items (10 pts)
-    const staleThreshold = 14 * DAY;
-    const allNotDone = allIssues.filter((i) => i.fields.status?.statusCategory?.key !== "done");
-    const allStale = allNotDone.filter((i) => (NOW - new Date(i.fields.updated).getTime()) > staleThreshold);
-    const stalePct = allNotDone.length > 0 ? Math.round(((allNotDone.length - allStale.length) / allNotDone.length) * 100) : 100;
-    const piStaleScore = Math.round(stalePct / 10);
-    checks.push({
-      id: "pi-stale-tickets", name: "PI Backlog Freshness", score: piStaleScore, maxScore: 10,
-      status: piStaleScore >= 8 ? "pass" : piStaleScore >= 5 ? "warning" : "fail",
-      description: `${allStale.length} tickets across all teams haven't been updated in 14+ days (${100 - stalePct}% stale). During a PI, every active item should show regular updates. Stale items signal blocked work, lost context, or abandoned scope.`,
-      detail: `${allStale.length}/${allNotDone.length} active tickets are stale across ${TEAMS.length} teams.`,
-      action: null,
-    });
-
-    // ── CHECK 6: Description Quality Across PI (10 pts)
-    const allEstimable = allNotDone.filter((i) => ["Story", "Task", "Bug"].includes(i.fields.issuetype?.name));
-    const allWithDesc = allEstimable.filter((i) => i.fields.description && i.fields.description.length >= 30);
-    const piDescPct = allEstimable.length > 0 ? Math.round((allWithDesc.length / allEstimable.length) * 100) : 100;
-    const piDescScore = Math.round(piDescPct / 10);
-    checks.push({
-      id: "pi-descriptions", name: "PI-Wide Story Quality", score: piDescScore, maxScore: 10,
-      status: piDescScore >= 8 ? "pass" : piDescScore >= 5 ? "warning" : "fail",
-      description: `${piDescPct}% of stories across all teams have meaningful descriptions. During PI planning, every committed story must be well-defined. Vague stories lead to misunderstandings and rework across teams.`,
-      detail: `${allWithDesc.length}/${allEstimable.length} stories/tasks have descriptions ≥30 chars.`,
-      action: null,
-    });
-
-    // ── CHECK 7: PI Progress On Track (10 pts)
-    const piDone = allIssues.filter((i) => i.fields.status?.statusCategory?.key === "done").length;
-    const piTotal = allIssues.length;
-    const piProgress = piTotal > 0 ? Math.round((piDone / piTotal) * 100) : 0;
-    // Check against elapsed time in PI
-    let expectedProgress = 50; // default midpoint
-    if (PI_CONFIG.enabled !== false && PI_CONFIG.startDate && PI_CONFIG.endDate) {
-      const piStart = new Date(PI_CONFIG.startDate).getTime();
-      const piEnd = new Date(PI_CONFIG.endDate).getTime();
-      const piDuration = piEnd - piStart;
-      const elapsed = Math.max(0, Math.min(NOW - piStart, piDuration));
-      expectedProgress = piDuration > 0 ? Math.round((elapsed / piDuration) * 100) : 50;
-    }
-    const progressDelta = piProgress - expectedProgress;
-    const onTrackScore = progressDelta >= -5 ? 10 : progressDelta >= -15 ? 7 : progressDelta >= -30 ? 4 : 1;
-    checks.push({
-      id: "pi-on-track", name: "PI Delivery On Track", score: onTrackScore, maxScore: 10,
-      status: onTrackScore >= 8 ? "pass" : onTrackScore >= 5 ? "warning" : "fail",
-      description: `PI is ${piProgress}% done vs ${expectedProgress}% expected (${progressDelta >= 0 ? "+" : ""}${progressDelta}%). Compare actual completion against time elapsed to detect if the PI is falling behind. Adjust scope or add capacity early.`,
-      detail: `${piDone}/${piTotal} issues done. PI elapsed: ~${expectedProgress}%. Delta: ${progressDelta >= 0 ? "+" : ""}${progressDelta}%.`,
-      action: null,
-    });
-
-    // ── CHECK 8: Consistent Team Velocity (10 pts) — all teams showing throughput
-    const teamsWithDone = TEAMS.filter((t) => {
-      const issues = teamDataMap[t.id]?.issues || [];
-      return issues.some((i) => i.fields.status?.statusCategory?.key === "done");
-    });
-    const velocityPct = TEAMS.length > 0 ? Math.round((teamsWithDone.length / TEAMS.length) * 100) : 100;
-    const velocityScore = Math.round(velocityPct / 10);
-    const zeroVelocityTeams = TEAMS.filter((t) => {
-      const issues = teamDataMap[t.id]?.issues || [];
-      return !issues.some((i) => i.fields.status?.statusCategory?.key === "done");
-    }).map((t) => t.name);
-    checks.push({
-      id: "team-velocity", name: "All Teams Delivering", score: velocityScore, maxScore: 10,
-      status: velocityScore >= 8 ? "pass" : velocityScore >= 5 ? "warning" : "fail",
-      description: `${teamsWithDone.length}/${TEAMS.length} teams have completed at least one ticket. Every team should show delivery progress during a PI. Zero throughput indicates blockers, misalignment, or capacity issues.`,
-      detail: zeroVelocityTeams.length > 0 ? `Teams with zero completed: ${zeroVelocityTeams.join(", ")}` : "All teams are delivering.",
-      action: null,
-    });
-
-    // ── CHECK 9: PI Config Completeness (5 pts)
-    const piConfigChecks = [PI_CONFIG.name, PI_CONFIG.startDate, PI_CONFIG.endDate, PI_CONFIG.sprintCount > 0, PI_CONFIG.sprintDuration > 0];
-    const piConfigDone = piConfigChecks.filter(Boolean).length;
-    const piConfigScore = Math.round((piConfigDone / piConfigChecks.length) * 5);
-    checks.push({
-      id: "pi-config", name: "PI Configuration Complete", score: piConfigScore, maxScore: 5,
-      status: piConfigScore >= 4 ? "pass" : piConfigScore >= 2 ? "warning" : "fail",
-      description: `${piConfigDone}/${piConfigChecks.length} PI config fields set. A fully configured PI (name, dates, sprint count, duration) enables time-based tracking, burndown charts, and progress forecasting. Complete the PI config in Settings.`,
-      detail: `Name: ${PI_CONFIG.name || "❌"}, Start: ${PI_CONFIG.startDate || "❌"}, End: ${PI_CONFIG.endDate || "❌"}, Sprints: ${PI_CONFIG.sprintCount || "❌"}, Duration: ${PI_CONFIG.sprintDuration || "❌"}`,
-      action: null,
-    });
-
-    // ── CHECK 10: Team JQL Customization (5 pts) — teams with custom JQL
-    const teamsWithJql = TEAMS.filter((t) => t.jql && t.jql.trim().length > 0);
-    const jqlPct = TEAMS.length > 0 ? Math.round((teamsWithJql.length / TEAMS.length) * 100) : 100;
-    const jqlScore = jqlPct >= 50 ? 5 : jqlPct > 0 ? 3 : 1;
-    checks.push({
-      id: "team-jql", name: "Per-Team JQL Filters", score: jqlScore, maxScore: 5,
-      status: jqlScore >= 4 ? "pass" : jqlScore >= 2 ? "warning" : "fail",
-      description: `${teamsWithJql.length}/${TEAMS.length} teams have custom JQL queries. Custom JQL lets each team scope their PI view precisely (e.g., by sprint, label, or component). Without it, teams see all project issues without filtering.`,
-      detail: teamsWithJql.map((t) => t.name).join(", ") || "No teams have custom JQL.",
-      action: null,
-    });
-
-    // ── CHECK 11: PI Architecture Health (10 pts) — cross-team issue definition quality
-    const acRegexPi = /acceptance\s*criteria|given\s.*when\s.*then|\bAC[:\s]|definition\s*of\s*done|\[x\]|\[ \]/i;
-    let piArchTotal = 0, piArchScore = 0;
-    const poorTeams = [];
-    for (const team of TEAMS) {
-      const issues = teamDataMap[team.id]?.issues || [];
-      const notDoneT = issues.filter((i) => i.fields.status?.statusCategory?.key !== "done");
-      if (notDoneT.length === 0) continue;
-      const epics = notDoneT.filter((i) => i.fields.issuetype?.name === "Epic");
-      const storiesTasks = notDoneT.filter((i) => ["Story", "Task", "Bug"].includes(i.fields.issuetype?.name));
-      let teamCriteria = 0, teamMet = 0;
-      // Epics: desc ≥50 + AC + due date
-      for (const e of epics) {
-        teamCriteria += 3;
-        if (e.fields.description && e.fields.description.length >= 50) teamMet++;
-        if (e.fields.description && acRegexPi.test(e.fields.description)) teamMet++;
-        if (e.fields.duedate) teamMet++;
-      }
-      // Stories/Tasks: desc + AC + estimate + assignee
-      for (const s of storiesTasks) {
-        teamCriteria += 4;
-        if (s.fields.description && s.fields.description.length >= 30) teamMet++;
-        if (s.fields.description && acRegexPi.test(s.fields.description)) teamMet++;
-        if (s.fields.timetracking?.originalEstimate || s.fields.timetracking?.remainingEstimate || s.fields.customfield_10016) teamMet++;
-        if (s.fields.assignee) teamMet++;
-      }
-      piArchTotal += teamCriteria;
-      piArchScore += teamMet;
-      if (teamCriteria > 0) {
-        const teamPct = Math.round((teamMet / teamCriteria) * 100);
-        if (teamPct < 50) poorTeams.push(`${team.name} (${teamPct}%)`);
-      }
-    }
-    const piArchPct = piArchTotal > 0 ? Math.round((piArchScore / piArchTotal) * 100) : 100;
-    const piArchFinal = Math.round(piArchPct / 10);
-    checks.push({
-      id: "pi-architecture", name: "PI Architecture Health", score: piArchFinal, maxScore: 10,
-      status: piArchFinal >= 8 ? "pass" : piArchFinal >= 5 ? "warning" : "fail",
-      description: `${piArchPct}% of issue definition criteria met across all teams. Measures whether epics have scope (description + AC + due date) and stories are dev-ready (description + AC + estimate + assignee). Low scores mean teams are working from poorly defined tickets.`,
-      detail: poorTeams.length > 0 ? `Teams below 50%: ${poorTeams.join(", ")}` : "All teams meet minimum definition quality.",
-      action: null,
-    });
-
-    // ── CHECK 12: Hierarchy Depth Coverage (10 pts) — proper epic→story→subtask hierarchy
-    let totalHierarchyItems = 0, wellStructured = 0;
-    const flatTeams = [];
-    for (const team of TEAMS) {
-      const issues = teamDataMap[team.id]?.issues || [];
-      const notDoneT = issues.filter((i) => i.fields.status?.statusCategory?.key !== "done");
-      if (notDoneT.length === 0) continue;
-      const hasEpics = notDoneT.some((i) => i.fields.issuetype?.name === "Epic");
-      const hasStories = notDoneT.some((i) => ["Story", "Task"].includes(i.fields.issuetype?.name));
-      const hasSubs = notDoneT.some((i) => {
-        const tn = (i.fields.issuetype?.name || "").toLowerCase();
-        return tn === "sub-task" || tn === "subtask" || i.fields.issuetype?.subtask === true;
-      });
-      totalHierarchyItems++;
-      const depth = (hasEpics ? 1 : 0) + (hasStories ? 1 : 0) + (hasSubs ? 1 : 0);
-      if (depth >= 2) wellStructured++;
-      else flatTeams.push(team.name);
-    }
-    const hierPct = totalHierarchyItems > 0 ? Math.round((wellStructured / totalHierarchyItems) * 100) : 100;
-    const hierScore = Math.round(hierPct / 10);
-    checks.push({
-      id: "pi-hierarchy", name: "Hierarchy Depth Coverage", score: hierScore, maxScore: 10,
-      status: hierScore >= 8 ? "pass" : hierScore >= 5 ? "warning" : "fail",
-      description: `${wellStructured}/${totalHierarchyItems} teams use at least 2 hierarchy levels (epic→story→subtask). Flat backlogs (only stories, no epics or subtasks) make it hard to plan, estimate, and track progress at multiple levels. Use epics for goals, stories for features, subtasks for work items.`,
-      detail: flatTeams.length > 0 ? `Flat teams: ${flatTeams.join(", ")}` : "All teams use proper hierarchy.",
-      action: null,
-    });
-
-    // ── CHECK 13: Overdue & At-Risk Items (10 pts) — PI-wide deadline health
-    let piOverdue = 0, piDueSoon = 0, piDated = 0;
-    for (const team of TEAMS) {
-      const issues = teamDataMap[team.id]?.issues || [];
-      const nd = issues.filter((i) => i.fields.status?.statusCategory?.key !== "done");
-      for (const i of nd) {
-        if (!i.fields.duedate) continue;
-        piDated++;
-        const daysLeft = Math.floor((new Date(i.fields.duedate).getTime() - NOW) / (86400000));
-        if (daysLeft < 0) piOverdue++;
-        else if (daysLeft <= 3) piDueSoon++;
-      }
-    }
-    const piAtRisk = piOverdue + piDueSoon;
-    const piAtRiskPct = piDated > 0 ? Math.round((piAtRisk / piDated) * 100) : 0;
-    const piDeadlineScore = piAtRiskPct <= 10 ? 10 : piAtRiskPct <= 20 ? 8 : piAtRiskPct <= 35 ? 5 : piAtRiskPct <= 50 ? 3 : 1;
-    checks.push({
-      id: "pi-deadlines", name: "PI Deadline Health", score: piDeadlineScore, maxScore: 10,
-      status: piDeadlineScore >= 8 ? "pass" : piDeadlineScore >= 5 ? "warning" : "fail",
-      description: `${piAtRisk} tickets are overdue or due within 3 days across all teams (${piAtRiskPct}% of ${piDated} dated items). Cluster overdue items signal systemic estimation or capacity issues, not just individual delays.`,
-      detail: `${piOverdue} overdue + ${piDueSoon} due in ≤3 days across ${TEAMS.length} teams.`,
-      action: null,
-    });
-
-    // ── CHECK 14: Dependency Risk (10 pts) — blocked cross-team items
-    let blockedCrossTeam = 0, totalCrossTeamLinked = 0;
-    const teamProjectKeys = new Set(TEAMS.map((t) => t.projectKey));
-    for (const team of TEAMS) {
-      const issues = teamDataMap[team.id]?.issues || [];
-      const nd = issues.filter((i) => i.fields.status?.statusCategory?.key !== "done");
-      for (const i of nd) {
-        const links = i.fields.issuelinks || [];
-        const hasCrossTeamDep = links.some((l) => {
-          const linked = l.inwardIssue || l.outwardIssue;
-          if (!linked) return false;
-          const linkedProject = linked.key?.split("-")[0];
-          return linkedProject && linkedProject !== team.projectKey && teamProjectKeys.has(linkedProject);
-        });
-        if (hasCrossTeamDep) {
-          totalCrossTeamLinked++;
-          const isBlocked = i.fields.status?.statusCategory?.key === "new" ||
-            (i.fields.labels || []).some((l) => l.toLowerCase().includes("block"));
-          if (isBlocked) blockedCrossTeam++;
-        }
-      }
-    }
-    const depRiskPct = totalCrossTeamLinked > 0 ? Math.round((blockedCrossTeam / totalCrossTeamLinked) * 100) : 0;
-    const depRiskScore = depRiskPct <= 5 ? 10 : depRiskPct <= 15 ? 8 : depRiskPct <= 30 ? 5 : depRiskPct <= 50 ? 3 : 1;
-    checks.push({
-      id: "dependency-risk", name: "Dependency Risk", score: depRiskScore, maxScore: 10,
-      status: depRiskScore >= 8 ? "pass" : depRiskScore >= 5 ? "warning" : "fail",
-      description: `${blockedCrossTeam}/${totalCrossTeamLinked} cross-team linked items are blocked or not started (${depRiskPct}%). Blocked dependencies cascade across teams — one team's delay becomes another team's blocker. Escalate and unblock.`,
-      detail: `${totalCrossTeamLinked} cross-team items, ${blockedCrossTeam} blocked/not started.`,
-      action: null,
-    });
-
-    // Filter out disabled checks
-    const activeChecks = checks.filter((c) => !DISABLED_PI_CHECKS.includes(c.id));
-    const totalScore = activeChecks.reduce((s, c) => s + c.score, 0);
-    const maxPossible = activeChecks.reduce((s, c) => s + c.maxScore, 0);
-    const overallPct = maxPossible > 0 ? Math.round((totalScore / maxPossible) * 100) : 100;
-
-    res.json({
-      score: overallPct,
-      totalScore,
-      maxPossible,
-      checks: activeChecks,
-      disabledChecks: DISABLED_PI_CHECKS,
-      allCheckIds: checks.map((c) => ({ id: c.id, name: c.name })),
-      piConfig: PI_CONFIG,
-      teamCount: TEAMS.length,
-      totalIssues: allIssues.length,
-      crossTeamDeps: depCount,
-    });
-  } catch (err) {
-    console.error("Error in compliance/pi:", err.message);
-    res.status(500).json(errorResponse(req, err));
-  }
-});
-
 // ─── Sprint & Velocity Endpoints ─────────────────────────
 
 // Get sprints for a board
@@ -3691,6 +2680,7 @@ app.get("/flow/cfd", async (req, res) => {
     const jql = req.query.jql || DEFAULT_JQL;
     if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
     const days = parseInt(req.query.days) || 30;
+
     const fieldsStr = "status,created,updated,resolutiondate";
     const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
 
@@ -3734,6 +2724,7 @@ app.get("/flow/cycle-time", async (req, res) => {
   try {
     const jql = req.query.jql || (JIRA_PROJECT_KEY ? `project = ${JIRA_PROJECT_KEY} AND statusCategory = Done ORDER BY resolutiondate DESC` : "");
     if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
+
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate";
     const data = await jiraSearchAll(jql, fieldsStr, 200, "", req.query.serverId);
 
@@ -3774,6 +2765,7 @@ app.get("/flow/metrics", async (req, res) => {
   try {
     const jql = req.query.jql || DEFAULT_JQL;
     if (!jql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
+
     const fieldsStr = "summary,status,assignee,priority,issuetype,created,updated,resolutiondate,duedate";
     const data = await jiraSearchAll(jql, fieldsStr, 100, "", req.query.serverId);
     const now = Date.now();
@@ -3820,7 +2812,7 @@ app.get("/flow/metrics", async (req, res) => {
       else statusDist.todo++;
     }
 
-    res.json({
+    const result = {
       throughput: weeklyThroughput,
       avgThroughput: weeklyThroughput.length > 0 ? Math.round(weeklyThroughput.reduce((s, w) => s + w.completed, 0) / weeklyThroughput.length) : 0,
       wipItems,
@@ -3828,7 +2820,8 @@ app.get("/flow/metrics", async (req, res) => {
       avgWipAge,
       statusDistribution: statusDist,
       totalIssues: data.issues.length,
-    });
+    };
+    res.json(result);
   } catch (err) {
     console.error("Error fetching flow metrics:", err.message);
     res.status(500).json(errorResponse(req, err));
@@ -4036,7 +3029,6 @@ app.get("/sprint-review", async (req, res) => {
   try {
     const userJql = req.query.jql || DEFAULT_JQL;
     if (!userJql) return res.status(400).json({ error: "No JQL query provided. Configure a default JQL in Settings or provide a ?jql= parameter." });
-
     const team = TEAMS[0];
     const server = getServer(team?.serverId || req.query.serverId);
     let activeSprint = null;
@@ -4089,7 +3081,7 @@ app.get("/sprint-review", async (req, res) => {
     const inProgress = issues.filter(i => i.statusCategory === "indeterminate").length;
     const todo = issues.filter(i => i.statusCategory === "new").length;
 
-    res.json({
+    const result = {
       sprint: activeSprint
         ? { id: activeSprint.id, name: activeSprint.name, goal: activeSprint.goal || "", startDate: activeSprint.startDate, endDate: activeSprint.endDate }
         : { id: null, name: "Sprint Review (JQL)", goal: "", startDate: null, endDate: null },
@@ -4097,7 +3089,8 @@ app.get("/sprint-review", async (req, res) => {
       epicGroups: Object.values(epicGroups).sort((a, b) => b.total - a.total),
       issues,
       serverUrl: getBrowserUrl(server),
-    });
+    };
+    res.json(result);
   } catch (err) {
     console.error("Error fetching sprint review:", err.message);
     res.status(500).json(errorResponse(req, err));
@@ -4190,14 +3183,12 @@ app.get("/dor", async (req, res) => {
   }
 });
 
-// ─── ROAM Risk Board (in-memory store) ───────────────────
+// ─── ROAM Risk Board (in-memory) ──────────
 
 let roamRisks = {};
 
 app.get("/roam/risks", (req, res) => {
-  const risks = Object.values(roamRisks)
-    .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-  res.json(risks);
+  res.json(Object.values(roamRisks).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)));
 });
 
 app.post("/roam/risks", (req, res) => {
@@ -4206,17 +3197,7 @@ app.post("/roam/risks", (req, res) => {
 
   const riskId = id || `risk-${Date.now()}`;
   const existing = roamRisks[riskId];
-  roamRisks[riskId] = {
-    id: riskId,
-    title,
-    description: description || "",
-    category, // "resolved" | "owned" | "accepted" | "mitigated"
-    owner: owner || "",
-    linkedIssues: linkedIssues || [],
-    severity: severity || "medium", // "low" | "medium" | "high" | "critical"
-    createdAt: existing?.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
+  roamRisks[riskId] = { id: riskId, title, description: description || "", category, owner: owner || "", linkedIssues: linkedIssues || [], severity: severity || "medium", createdAt: existing?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
   res.json(roamRisks[riskId]);
 });
 
@@ -4225,49 +3206,27 @@ app.delete("/roam/risks/:id", (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── Team Health Check (in-memory store) ─────────────────
+// ─── Team Health Check (in-memory) ────────
 
-let healthChecks = {};
+const HC_CATEGORIES = [
+  { id: "mission", label: "Mission & Purpose", emoji: "\uD83C\uDFAF" },
+  { id: "speed", label: "Delivery Speed", emoji: "\uD83D\uDE80" },
+  { id: "quality", label: "Code Quality", emoji: "\u2728" },
+  { id: "fun", label: "Fun & Teamwork", emoji: "\uD83C\uDF89" },
+  { id: "learning", label: "Learning & Growth", emoji: "\uD83D\uDCDA" },
+  { id: "support", label: "Support & Tools", emoji: "\uD83D\uDEE0\uFE0F" },
+  { id: "communication", label: "Communication", emoji: "\uD83D\uDCAC" },
+  { id: "autonomy", label: "Autonomy", emoji: "\uD83D\uDDFD" },
+];
 
-app.get("/health-check/sessions", (req, res) => {
-  const sessions = Object.values(healthChecks)
-    .map(({ id, title, createdAt, responses }) => ({
-      id, title, createdAt, responseCount: responses.length,
-    }))
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  res.json(sessions);
-});
+let healthCheckSessions = {};
 
-app.post("/health-check/sessions", (req, res) => {
-  const id = `hc-${Date.now()}`;
-  const session = {
-    id,
-    title: req.body.title || `Health Check ${new Date().toISOString().split("T")[0]}`,
-    createdAt: new Date().toISOString(),
-    categories: [
-      { id: "mission", label: "Mission & Purpose", emoji: "🎯" },
-      { id: "speed", label: "Delivery Speed", emoji: "🚀" },
-      { id: "quality", label: "Code Quality", emoji: "✨" },
-      { id: "fun", label: "Fun & Teamwork", emoji: "🎉" },
-      { id: "learning", label: "Learning & Growth", emoji: "📚" },
-      { id: "support", label: "Support & Tools", emoji: "🛠️" },
-      { id: "communication", label: "Communication", emoji: "💬" },
-      { id: "autonomy", label: "Autonomy", emoji: "🗽" },
-    ],
-    responses: [],
-  };
-  healthChecks[id] = session;
-  res.json(session);
-});
-
-app.get("/health-check/sessions/:id", (req, res) => {
-  const session = healthChecks[req.params.id];
-  if (!session) return res.status(404).json({ error: "Session not found" });
-
-  // Aggregate scores
+function aggregateHealthCheck(session) {
+  const categories = session.categories || HC_CATEGORIES;
+  const responses = session.responses || [];
   const aggregated = {};
-  for (const cat of session.categories) {
-    const catResponses = session.responses.filter(r => r.categoryId === cat.id);
+  for (const cat of categories) {
+    const catResponses = responses.filter(r => r.categoryId === cat.id);
     const scores = catResponses.map(r => r.score);
     aggregated[cat.id] = {
       ...cat,
@@ -4276,41 +3235,56 @@ app.get("/health-check/sessions/:id", (req, res) => {
       distribution: { green: scores.filter(s => s >= 4).length, yellow: scores.filter(s => s === 3).length, red: scores.filter(s => s <= 2).length },
     };
   }
+  return aggregated;
+}
 
-  res.json({ ...session, aggregated });
+app.get("/health-check/sessions", (req, res) => {
+  res.json(Object.values(healthCheckSessions).map(({ id, title, createdAt, responses }) => ({ id, title, createdAt, responseCount: responses.length })).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+});
+
+app.post("/health-check/sessions", (req, res) => {
+  const title = req.body.title || `Health Check ${new Date().toISOString().split("T")[0]}`;
+  const data = { categories: HC_CATEGORIES, responses: [] };
+  const id = `hc-${Date.now()}`;
+  const session = { id, title, createdAt: new Date().toISOString(), ...data };
+  healthCheckSessions[id] = session;
+  res.json(session);
+});
+
+app.get("/health-check/sessions/:id", (req, res) => {
+  const session = healthCheckSessions[req.params.id];
+  if (!session) return res.status(404).json({ error: "Session not found" });
+  res.json({ ...session, aggregated: aggregateHealthCheck(session) });
 });
 
 app.post("/health-check/sessions/:id/vote", (req, res) => {
-  const session = healthChecks[req.params.id];
-  if (!session) return res.status(404).json({ error: "Session not found" });
-
   const { voter, categoryId, score, comment } = req.body;
   if (!categoryId || score == null) return res.status(400).json({ error: "Missing categoryId or score" });
 
-  session.responses.push({
+  const vote = {
     id: `vote-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-    voter: voter || "Anonymous",
-    categoryId,
+    voter: voter || "Anonymous", categoryId,
     score: Math.min(5, Math.max(1, parseInt(score))),
-    comment: comment || "",
-    createdAt: new Date().toISOString(),
-  });
+    comment: comment || "", createdAt: new Date().toISOString(),
+  };
+
+  const session = healthCheckSessions[req.params.id];
+  if (!session) return res.status(404).json({ error: "Session not found" });
+  session.responses.push(vote);
   res.json({ ok: true });
 });
 
 app.delete("/health-check/sessions/:id", (req, res) => {
-  delete healthChecks[req.params.id];
+  delete healthCheckSessions[req.params.id];
   res.json({ ok: true });
 });
 
-// ─── Sprint Goals Tracker (in-memory store) ──────────────
+// ─── Sprint Goals Tracker (in-memory) ─────
 
 let sprintGoals = {};
 
 app.get("/sprint-goals", (req, res) => {
-  const goals = Object.values(sprintGoals)
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  res.json(goals);
+  res.json(Object.values(sprintGoals).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
 });
 
 app.post("/sprint-goals", (req, res) => {
@@ -4319,21 +3293,21 @@ app.post("/sprint-goals", (req, res) => {
     return res.status(400).json({ error: "Missing sprintName or goals array" });
   }
 
-  const goalId = id || `sg-${Date.now()}`;
-  const existing = sprintGoals[goalId];
-  sprintGoals[goalId] = {
-    id: goalId,
+  const data = {
     sprintName,
     goals: goals.map((g, i) => ({
       id: g.id || `g-${Date.now()}-${i}`,
       text: g.text,
-      status: g.status || "not_started", // "not_started" | "in_progress" | "achieved" | "missed"
+      status: g.status || "not_started",
       linkedIssues: g.linkedIssues || [],
       notes: g.notes || "",
     })),
-    createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+
+  const goalId = id || `sg-${Date.now()}`;
+  const existing = sprintGoals[goalId];
+  sprintGoals[goalId] = { id: goalId, ...data, createdAt: existing?.createdAt || new Date().toISOString() };
   res.json(sprintGoals[goalId]);
 });
 
@@ -4344,15 +3318,8 @@ app.delete("/sprint-goals/:id", (req, res) => {
 
 // ─── AI Coach Endpoint ───────────────────────────────────
 
-app.post("/ai/coach", async (req, res) => {
-  try {
-    const { context, question, data } = req.body;
-    if (!context || !question) {
-      return res.status(400).json({ error: "Missing context or question" });
-    }
-
-    // Build the prompt and return it — no external AI provider call
-    const prompt = `You are an experienced Agile Coach and Scrum Master. You help teams improve their agile practices, identify process issues, and suggest actionable improvements.
+function buildAiPrompt(context, question, data) {
+  return `You are an experienced Agile Coach and Scrum Master. You help teams improve their agile practices, identify process issues, and suggest actionable improvements.
 
 CONTEXT: ${context}
 
@@ -4362,7 +3329,82 @@ ${JSON.stringify(data || {}, null, 2).substring(0, 8000)}
 USER QUESTION: ${question}
 
 Provide a helpful, actionable response. Be specific and reference the data when possible. Keep your response concise but thorough. Use bullet points for recommendations. If suggesting process changes, explain the "why" behind each suggestion.`;
+}
 
+async function callAiProvider(prompt) {
+  const { provider, model, apiKey, baseUrl } = AI_CONFIG;
+
+  if (provider === "openai" || provider === "custom") {
+    const url = (provider === "custom" && baseUrl) ? `${baseUrl.replace(/\/+$/, "")}/chat/completions` : "https://api.openai.com/v1/chat/completions";
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: model || "gpt-4o-mini", messages: [{ role: "user", content: prompt }], max_tokens: 1500 }),
+    });
+    if (!resp.ok) { const t = await resp.text(); throw new Error(`OpenAI API ${resp.status}: ${t.slice(0, 200)}`); }
+    const json = await resp.json();
+    return json.choices?.[0]?.message?.content || "";
+  }
+
+  if (provider === "anthropic") {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: model || "claude-haiku-4-5-20251001", max_tokens: 1500, messages: [{ role: "user", content: prompt }] }),
+    });
+    if (!resp.ok) { const t = await resp.text(); throw new Error(`Anthropic API ${resp.status}: ${t.slice(0, 200)}`); }
+    const json = await resp.json();
+    return json.content?.[0]?.text || "";
+  }
+
+  if (provider === "mistral") {
+    const resp = await fetch("https://api.mistral.ai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: model || "mistral-small-latest", messages: [{ role: "user", content: prompt }], max_tokens: 1500 }),
+    });
+    if (!resp.ok) { const t = await resp.text(); throw new Error(`Mistral API ${resp.status}: ${t.slice(0, 200)}`); }
+    const json = await resp.json();
+    return json.choices?.[0]?.message?.content || "";
+  }
+
+  if (provider === "ollama") {
+    const base = baseUrl || "http://localhost:11434";
+    const resp = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: model || "llama3", messages: [{ role: "user", content: prompt }], stream: false }),
+    });
+    if (!resp.ok) { const t = await resp.text(); throw new Error(`Ollama API ${resp.status}: ${t.slice(0, 200)}`); }
+    const json = await resp.json();
+    return json.message?.content || "";
+  }
+
+  throw new Error("no_provider");
+}
+
+app.post("/ai/coach", async (req, res) => {
+  try {
+    const { context, question, data } = req.body;
+    if (!context || !question) {
+      return res.status(400).json({ error: "Missing context or question" });
+    }
+
+    const prompt = buildAiPrompt(context, question, data);
+
+    // If AI provider is configured and enabled, call it
+    if (AI_CONFIG.enabled && AI_CONFIG.provider && (AI_CONFIG.apiKey || AI_CONFIG.provider === "ollama")) {
+      try {
+        const answer = await callAiProvider(prompt);
+        return res.json({ answer, prompt, context, question });
+      } catch (aiErr) {
+        if (aiErr.message !== "no_provider") {
+          return res.status(502).json({ error: `AI provider error: ${aiErr.message}`, prompt });
+        }
+      }
+    }
+
+    // No provider configured — return the prompt for the user to use manually
     res.json({ prompt, context, question });
   } catch (err) {
     console.error("Error in AI coach:", err.message);
@@ -4625,6 +3667,7 @@ Respond with ONLY valid JSON (no markdown, no backticks):
 // ─── Start ───────────────────────────────────────────────
 const server = app.listen(PORT, async () => {
   console.log(`Dashboard API running on port ${PORT}`);
+
   console.log(`Config loaded from: ${configSource}`);
   console.log(`Jira: ${defaultServer().url}`);
   console.log(`Teams: ${TEAMS.map((t) => t.name).join(", ")}`);

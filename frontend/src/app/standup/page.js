@@ -6,6 +6,7 @@ import AiCoachPanel from "../../components/AiCoachPanel";
 import JqlBar from "../../components/JqlBar";
 import { toast } from "../../components/Toaster";
 import { useAppConfig } from "../../context/AppConfigContext";
+import TicketDiffModal from "../../components/TicketDiffModal";
 
 const TIME_RANGES = [
   { label: "24h", hours: 24 },
@@ -93,7 +94,7 @@ function ChangeBadge({ type, detail }) {
   );
 }
 
-function DetailedIssueCard({ issue, showComments = true }) {
+function DetailedIssueCard({ issue, showComments = true, onSuggestFix }) {
   const { jiraBaseUrl } = useAppConfig();
   const [expanded, setExpanded] = useState(false);
   const commentCount = issue.recentComments?.length || 0;
@@ -122,6 +123,9 @@ function DetailedIssueCard({ issue, showComments = true }) {
         <div className="flex items-center gap-1.5 shrink-0">
           <StatusBadge status={issue.status} statusCategory={issue.statusCategory} />
           <PriorityBadge priority={issue.priority} />
+          {onSuggestFix && (
+            <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+          )}
         </div>
       </div>
 
@@ -323,7 +327,7 @@ function filterDataByUser(data, user) {
 }
 
 // ─── Standup content for a tab ─────────────────────────────
-function StandupContent({ data, hours, prompts }) {
+function StandupContent({ data, hours, prompts, onSuggestFix }) {
   const { jiraBaseUrl } = useAppConfig();
   const summary = data?.summary || {};
   const workload = data?.workload || {};
@@ -359,7 +363,7 @@ function StandupContent({ data, hours, prompts }) {
               <SectionHeader title="Recently Updated" count={data.recentlyUpdated.length} accentColor="border-blue-500" subtitle={`Issues with activity in the last ${hours}h`} />
               <div className="space-y-2">
                 {data.recentlyUpdated.map((issue) => (
-                  <DetailedIssueCard key={issue.key} issue={issue} />
+                  <DetailedIssueCard key={issue.key} issue={issue} onSuggestFix={onSuggestFix} />
                 ))}
               </div>
             </div>
@@ -370,7 +374,7 @@ function StandupContent({ data, hours, prompts }) {
               <SectionHeader title="Blocked Items" count={data.blocked.length} accentColor="border-red-500" subtitle="Items with 'block' label" />
               <div className="space-y-2">
                 {data.blocked.map((issue) => (
-                  <DetailedIssueCard key={issue.key} issue={issue} />
+                  <DetailedIssueCard key={issue.key} issue={issue} onSuggestFix={onSuggestFix} />
                 ))}
               </div>
             </div>
@@ -395,6 +399,9 @@ function StandupContent({ data, hours, prompts }) {
                       {issue.assignee && <span>{issue.assignee}</span>}
                       <StatusBadge status={issue.status} statusCategory={issue.statusCategory} />
                       <PriorityBadge priority={issue.priority} />
+                      {onSuggestFix && (
+                        <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -407,7 +414,7 @@ function StandupContent({ data, hours, prompts }) {
               <SectionHeader title="Recently Resolved" count={data.recentlyResolved.length} accentColor="border-green-500" subtitle="Completed in this period" />
               <div className="space-y-2">
                 {data.recentlyResolved.map((issue) => (
-                  <DetailedIssueCard key={issue.key} issue={issue} showComments={false} />
+                  <DetailedIssueCard key={issue.key} issue={issue} showComments={false} onSuggestFix={onSuggestFix} />
                 ))}
               </div>
             </div>
@@ -430,6 +437,9 @@ function StandupContent({ data, hours, prompts }) {
                       {issue.assignee && <span>{issue.assignee}</span>}
                       <StatusBadge status={issue.status} statusCategory={issue.statusCategory} />
                       <span className="text-gray-400">Last updated {timeAgo(issue.updated)}</span>
+                      {onSuggestFix && (
+                        <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -493,6 +503,9 @@ function StandupContent({ data, hours, prompts }) {
                       {issue.assignee ? <span>{issue.assignee}</span> : <span className="text-orange-500">Unassigned</span>}
                       <span className="text-gray-400">{issue.issueType}</span>
                       <PriorityBadge priority={issue.priority} />
+                      {onSuggestFix && (
+                        <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -591,6 +604,7 @@ export default function StandupPage() {
   const [jql, setJql] = useState("");
   const [inputJql, setInputJql] = useState("");
   const [activeTab, setActiveTab] = useState("all");
+  const [diffTicket, setDiffTicket] = useState(null);
 
   useEffect(() => {
     if (defaultJql) {
@@ -736,7 +750,7 @@ export default function StandupPage() {
           </div>
         ) : tabData ? (
           <div className="space-y-6">
-            <StandupContent data={tabData} hours={hours} prompts={tabPrompts} />
+            <StandupContent data={tabData} hours={hours} prompts={tabPrompts} onSuggestFix={setDiffTicket} />
           </div>
         ) : (
           <div className="text-center py-20 text-sm text-gray-400">
@@ -744,6 +758,7 @@ export default function StandupPage() {
           </div>
         )}
       </div>
+      {diffTicket && <TicketDiffModal ticket={diffTicket} onClose={() => setDiffTicket(null)} jiraBaseUrl={jiraBaseUrl} />}
     </div>
   );
 }

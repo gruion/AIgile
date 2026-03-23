@@ -4,9 +4,10 @@ import { useState, useEffect, useMemo } from "react";
 import JqlBar from "../../components/JqlBar";
 import ResizableTable from "../../components/ResizableTable";
 import IssueHoverCard from "../../components/IssueHoverCard";
-import { fetchIssues, fetchPiOverview, fetchConfig } from "../../lib/api";
+import { fetchIssues } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 import AiCoachPanel from "../../components/AiCoachPanel";
+import TicketDiffModal from "../../components/TicketDiffModal";
 import { useAppConfig } from "../../context/AppConfigContext";
 
 // ─── Color palette ──────────────────────────────────────
@@ -62,52 +63,28 @@ function isSameDay(a, b) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
-// ─── Normalize issues from both project & PI data ──────
-function normalizeIssues(data, source) {
+// ─── Normalize issues ───────────────────────────────────
+function normalizeIssues(data) {
   const issues = [];
   const epicColorMap = {};
   let colorIdx = 0;
 
-  if (source === "project") {
-    const epics = data.epics || [];
-    const noEpic = data.noEpic || [];
-    for (const epic of epics) {
-      if (!epicColorMap[epic.key]) {
-        epicColorMap[epic.key] = EPIC_COLORS[colorIdx % EPIC_COLORS.length];
-        colorIdx++;
-      }
-      for (const issue of epic.issues || []) {
-        issues.push({ ...issue, epicKey: epic.key, epicName: epic.name, color: epicColorMap[epic.key] });
-      }
+  const epics = data.epics || [];
+  const noEpic = data.noEpic || [];
+  for (const epic of epics) {
+    if (!epicColorMap[epic.key]) {
+      epicColorMap[epic.key] = EPIC_COLORS[colorIdx % EPIC_COLORS.length];
+      colorIdx++;
     }
-    if (!epicColorMap["__no_epic__"]) {
-      epicColorMap["__no_epic__"] = EPIC_COLORS[colorIdx % EPIC_COLORS.length];
+    for (const issue of epic.issues || []) {
+      issues.push({ ...issue, epicKey: epic.key, epicName: epic.name, color: epicColorMap[epic.key] });
     }
-    for (const issue of noEpic) {
-      issues.push({ ...issue, epicKey: "__no_epic__", epicName: "No Epic", color: epicColorMap["__no_epic__"] });
-    }
-  } else {
-    // PI data — teams contain sprints with issues
-    const teams = data.teams || [];
-    for (const team of teams) {
-      if (!epicColorMap[team.key || team.name]) {
-        epicColorMap[team.key || team.name] = EPIC_COLORS[colorIdx % EPIC_COLORS.length];
-        colorIdx++;
-      }
-      const teamColor = epicColorMap[team.key || team.name];
-      const sprints = team.sprints || [];
-      for (const sprint of sprints) {
-        for (const issue of sprint.issues || []) {
-          issues.push({
-            ...issue,
-            epicKey: team.key || team.name,
-            epicName: team.name,
-            sprintName: sprint.name,
-            color: teamColor,
-          });
-        }
-      }
-    }
+  }
+  if (!epicColorMap["__no_epic__"]) {
+    epicColorMap["__no_epic__"] = EPIC_COLORS[colorIdx % EPIC_COLORS.length];
+  }
+  for (const issue of noEpic) {
+    issues.push({ ...issue, epicKey: "__no_epic__", epicName: "No Epic", color: epicColorMap["__no_epic__"] });
   }
   return { issues, epicColorMap };
 }
@@ -298,7 +275,7 @@ const PLANNING_SORT_FN = (a, b, key) => {
   return String(a[key] || "").localeCompare(String(b[key] || ""));
 };
 
-function TaskListView({ issues }) {
+function TaskListView({ issues, onSuggestFix }) {
   const { jiraBaseUrl } = useAppConfig();
   const [filterStatus, setFilterStatus] = useState("all");
 
@@ -376,7 +353,13 @@ function TaskListView({ issues }) {
           <span className="text-gray-300">—</span>
         ),
     },
-  ], [today]);
+    {
+      key: "suggestFix", label: "AI", sortable: false, defaultWidth: 90, minWidth: 70,
+      render: (row) => (
+        <button onClick={() => onSuggestFix(row)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+      ),
+    },
+  ], [today, onSuggestFix]);
 
   return (
     <div>
@@ -589,24 +572,12 @@ const TABS = [
 export default function PlanningPage() {
   const { defaultJql, jiraBaseUrl } = useAppConfig();
   const [tab, setTab] = useState("list");
-  const [scope, setScope] = useState("project"); // "project" or "pi"
+  const [diffTicket, setDiffTicket] = useState(null);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [jql, setJql] = useState("");
   const [inputJql, setInputJql] = useState("");
-  const [piEnabled, setPiEnabled] = useState(false);
-  const [piTeams, setPiTeams] = useState([]);
-  const [selectedTeam, setSelectedTeam] = useState("all");
-
-  // Load config to check PI mode
-  useEffect(() => {
-    fetchConfig().then((cfg) => {
-      const enabled = !!cfg.piConfig?.enabled;
-      setPiEnabled(enabled);
-      setPiTeams(cfg.teams || []);
-    }).catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (defaultJql) {
@@ -615,20 +586,15 @@ export default function PlanningPage() {
     }
   }, [defaultJql]);
 
-  // Load data based on scope
+  // Load data
   useEffect(() => {
     if (!jql) { setLoading(false); return; }
     async function load() {
       setLoading(true);
       setError(null);
       try {
-        if (scope === "pi") {
-          const result = await fetchPiOverview();
-          setData(result);
-        } else {
-          const result = await fetchIssues(jql);
-          setData(result);
-        }
+        const result = await fetchIssues(jql);
+        setData(result);
         toast.success("Planning data loaded");
       } catch (err) {
         setError(err.message);
@@ -637,32 +603,26 @@ export default function PlanningPage() {
       setLoading(false);
     }
     load();
-  }, [scope, jql]);
+  }, [jql]);
 
   // Normalize issues
   const { issues } = useMemo(() => {
     if (!data) return { issues: [] };
-    return normalizeIssues(data, scope);
-  }, [data, scope]);
-
-  // Filter by team in PI mode
-  const filteredIssues = useMemo(() => {
-    if (scope !== "pi" || selectedTeam === "all") return issues;
-    return issues.filter((i) => i.epicKey === selectedTeam);
-  }, [issues, scope, selectedTeam]);
+    return normalizeIssues(data);
+  }, [data]);
 
   // Stats
   const stats = useMemo(() => {
-    const total = filteredIssues.length;
-    const withDue = filteredIssues.filter((i) => i.dueDate).length;
-    const overdue = filteredIssues.filter((i) => {
+    const total = issues.length;
+    const withDue = issues.filter((i) => i.dueDate).length;
+    const overdue = issues.filter((i) => {
       const d = parseDate(i.dueDate);
       return d && d < new Date() && i.statusCategory !== "done";
     }).length;
-    const inProgress = filteredIssues.filter((i) => i.statusCategory === "indeterminate").length;
-    const done = filteredIssues.filter((i) => i.statusCategory === "done").length;
+    const inProgress = issues.filter((i) => i.statusCategory === "indeterminate").length;
+    const done = issues.filter((i) => i.statusCategory === "done").length;
     return { total, withDue, overdue, inProgress, done };
-  }, [filteredIssues]);
+  }, [issues]);
 
   return (
     <div className="min-h-screen">
@@ -671,60 +631,9 @@ export default function PlanningPage() {
         <div className="max-w-[1600px] mx-auto px-4 py-3">
           <div className="flex items-center justify-between mb-3">
             <h1 className="text-lg font-bold text-gray-900">Planning</h1>
-
-            {/* Scope toggle */}
-            <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5">
-              <button
-                onClick={() => setScope("project")}
-                className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
-                  scope === "project" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
-                }`}
-              >
-                Project
-              </button>
-              {piEnabled && (
-                <button
-                  onClick={() => setScope("pi")}
-                  className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
-                    scope === "pi" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
-                  }`}
-                >
-                  PI Level
-                </button>
-              )}
-            </div>
           </div>
 
-          {/* JQL bar for project scope */}
-          {scope === "project" && (
-            <JqlBar value={inputJql} onChange={setInputJql} onSubmit={(q) => setJql(q)} />
-          )}
-
-          {/* Team filter for PI scope */}
-          {scope === "pi" && piTeams.length > 0 && (
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs text-gray-500">Team:</span>
-              <button
-                onClick={() => setSelectedTeam("all")}
-                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                  selectedTeam === "all" ? "bg-blue-50 text-blue-600 border-blue-200" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
-                }`}
-              >
-                All Teams
-              </button>
-              {piTeams.map((t) => (
-                <button
-                  key={t.key || t.name}
-                  onClick={() => setSelectedTeam(t.key || t.name)}
-                  className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                    selectedTeam === (t.key || t.name) ? "bg-blue-50 text-blue-600 border-blue-200" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
-                  }`}
-                >
-                  {t.name}
-                </button>
-              ))}
-            </div>
-          )}
+          <JqlBar value={inputJql} onChange={setInputJql} onSubmit={(q) => setJql(q)} />
 
           {/* Stats bar */}
           {!loading && (
@@ -772,14 +681,14 @@ export default function PlanningPage() {
           </div>
         )}
 
-        {!loading && filteredIssues.length > 0 && (
+        {!loading && issues.length > 0 && (
           <>
-            <PlanningInsightsPanel issues={filteredIssues} />
+            <PlanningInsightsPanel issues={issues} />
             {/* Sprint Planning AI Coach */}
             <div className="mb-4">
               <AiCoachPanel
                 context="Sprint Planning"
-                data={{ stats, issueCount: filteredIssues.length, scope }}
+                data={{ stats, issueCount: issues.length }}
                 prompts={[
                   {
                     label: "Sprint Capacity Check",
@@ -805,8 +714,8 @@ export default function PlanningPage() {
                 ]}
               />
             </div>
-            {tab === "calendar" && <CalendarView issues={filteredIssues} />}
-            {tab === "list" && <TaskListView issues={filteredIssues} />}
+            {tab === "calendar" && <CalendarView issues={issues} />}
+            {tab === "list" && <TaskListView issues={issues} onSuggestFix={setDiffTicket} />}
           </>
         )}
 
@@ -824,13 +733,14 @@ export default function PlanningPage() {
           </div>
         )}
 
-        {!loading && filteredIssues.length === 0 && !error && jql && (
+        {!loading && issues.length === 0 && !error && jql && (
           <div className="text-center py-12 text-gray-400">
             <p className="text-lg mb-2">No issues found</p>
-            <p className="text-sm">{scope === "project" ? "Try adjusting your JQL query" : "No PI data available"}</p>
+            <p className="text-sm">Try adjusting your JQL query</p>
           </div>
         )}
       </main>
+      {diffTicket && <TicketDiffModal ticket={diffTicket} onClose={() => setDiffTicket(null)} jiraBaseUrl={jiraBaseUrl} />}
     </div>
   );
 }

@@ -1,10 +1,10 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Link from "next/link";
 import { fetchProjectCompliance } from "../../lib/api";
 import JqlBar from "../../components/JqlBar";
 import AiCoachPanel from "../../components/AiCoachPanel";
+import TicketDiffModal from "../../components/TicketDiffModal";
 import ComplianceStepper from "../../components/ComplianceStepper";
 import { toast } from "../../components/Toaster";
 
@@ -26,7 +26,7 @@ function ScoreRing({ score, size = 80 }) {
   );
 }
 
-function CheckCard({ check }) {
+function CheckCard({ check, onSuggestFix }) {
   const [expanded, setExpanded] = useState(false);
   const statusStyles = {
     pass: "border-green-200 bg-green-50",
@@ -54,6 +54,18 @@ function CheckCard({ check }) {
             <h4 className="text-sm font-semibold text-gray-800">{check.name}</h4>
           </div>
           <div className="flex items-center gap-2">
+            {check.status !== "pass" && onSuggestFix && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const ticketKey = check.action?.keys?.[0] || check.id;
+                  onSuggestFix({ key: ticketKey, summary: check.name, checks: [check], missingItems: check.status === "fail" ? [check.name] : [] });
+                }}
+                className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap"
+              >
+                Suggest Fix
+              </button>
+            )}
             <span className="text-sm font-bold text-gray-700">{check.score}/{check.maxScore}</span>
             <span className="text-gray-400 text-xs">{expanded ? "▲" : "▼"}</span>
           </div>
@@ -74,15 +86,25 @@ function CheckCard({ check }) {
               <div className="text-[10px] font-medium text-gray-500 uppercase tracking-wider">{check.action.label}</div>
               <div className="flex flex-wrap gap-1.5">
                 {check.action.keys.map((key) => (
-                  <a
-                    key={key}
-                    href={`${check.action.serverUrl}/browse/${key}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs font-mono text-blue-600 bg-white rounded px-2 py-1 hover:bg-blue-50 hover:underline border border-blue-200 transition-colors"
-                  >
-                    {key}
-                  </a>
+                  <span key={key} className="inline-flex flex-col items-center gap-1">
+                    <a
+                      href={`${check.action.serverUrl}/browse/${key}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs font-mono text-blue-600 bg-white rounded px-2 py-1 hover:bg-blue-50 hover:underline border border-blue-200 transition-colors"
+                    >
+                      {key}
+                    </a>
+                    {onSuggestFix && (
+                      <button
+                        onClick={() => onSuggestFix({ key, summary: check.name, checks: [check] })}
+                        className="text-[9px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-1.5 py-0.5 rounded transition-colors"
+                        title="AI Suggest Fix"
+                      >
+                        Suggest Fix
+                      </button>
+                    )}
+                  </span>
                 ))}
               </div>
             </div>
@@ -101,6 +123,7 @@ export default function CompliancePage() {
   const [expandedProjects, setExpandedProjects] = useState({}); // { teamId: true/false }
   const [jql, setJql] = useState("");
   const [inputJql, setInputJql] = useState("");
+  const [diffTicket, setDiffTicket] = useState(null);
 
   const toggleProject = (id) => setExpandedProjects((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -194,9 +217,6 @@ export default function CompliancePage() {
                     <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> Fail (&lt;40%)</span>
                   </div>
                 </div>
-                <Link href="/pi-compliance" className="text-sm bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition-colors">
-                  PI Compliance &rarr;
-                </Link>
               </div>
             </div>
 
@@ -262,11 +282,12 @@ export default function CompliancePage() {
                             checks={project.checks}
                             onReload={load}
                             loading={loading}
+                            onSuggestFix={setDiffTicket}
                           />
                         ) : (
                           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                             {project.checks.map((check) => (
-                              <CheckCard key={check.id} check={check} />
+                              <CheckCard key={check.id} check={check} onSuggestFix={setDiffTicket} />
                             ))}
                           </div>
                         )}
@@ -280,6 +301,13 @@ export default function CompliancePage() {
         )}
 
       </main>
+
+      {diffTicket && (
+        <TicketDiffModal
+          ticket={diffTicket}
+          onClose={() => setDiffTicket(null)}
+        />
+      )}
     </div>
   );
 }

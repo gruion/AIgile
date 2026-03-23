@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import JqlBar from "../../components/JqlBar";
 import AiCoachPanel from "../../components/AiCoachPanel";
+import TicketDiffModal from "../../components/TicketDiffModal";
 import { fetchIssues, fetchDoR, fetchAnalytics } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 import { useAppConfig } from "../../context/AppConfigContext";
@@ -205,6 +206,7 @@ export default function BacklogRefinementPage() {
   const [error, setError] = useState(null);
   const [sortField, setSortField] = useState("score");
   const [sortDir, setSortDir] = useState("desc");
+  const [diffTicket, setDiffTicket] = useState(null);
 
   // ─── Data fetching ──────────────────────────────────
 
@@ -618,6 +620,7 @@ export default function BacklogRefinementPage() {
                       <SortHeader field="missing">Missing</SortHeader>
                       <SortHeader field="age">Age</SortHeader>
                       <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-3 py-2">Assignee</th>
+                      <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-3 py-2 w-20"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
@@ -687,6 +690,18 @@ export default function BacklogRefinementPage() {
                             <span className="text-gray-300">Unassigned</span>
                           )}
                         </td>
+
+                        {/* Suggest Fix */}
+                        <td className="px-3 py-2.5">
+                          {item.missingItems.length > 0 && (
+                            <button
+                              onClick={() => setDiffTicket(item)}
+                              className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap"
+                            >
+                              Suggest Fix
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -717,6 +732,14 @@ export default function BacklogRefinementPage() {
           </div>
         )}
       </main>
+
+      {diffTicket && (
+        <TicketDiffModal
+          ticket={diffTicket}
+          onClose={() => setDiffTicket(null)}
+          jiraBaseUrl={jiraBaseUrl}
+        />
+      )}
     </div>
   );
 }

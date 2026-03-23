@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useMemo } from "react";
 import JqlBar from "../../components/JqlBar";
+import TicketDiffModal from "../../components/TicketDiffModal";
 import { fetchIssues, fetchSettings } from "../../lib/api";
 import { selectTicketsForPrompt, formatTicketForPrompt, trimPrompt } from "../../lib/prompt-utils";
 import { toast } from "../../components/Toaster";
@@ -321,7 +322,7 @@ function HierarchyNode({ node, depth = 0 }) {
   );
 }
 
-function ArchitectureReport({ report }) {
+function ArchitectureReport({ report, onSuggestFix }) {
   const [activeSection, setActiveSection] = useState("hierarchy");
 
   const sections = [
@@ -448,9 +449,15 @@ function ArchitectureReport({ report }) {
                   <div className="flex items-center gap-2 mb-1">
                     <JiraLink ticketKey={item.key} />
                     <SeverityBadge severity={item.severity} />
-                    <span className="text-sm text-gray-700 truncate">
+                    <span className="text-sm text-gray-700 truncate flex-1">
                       {item.summary}
                     </span>
+                    <button
+                      onClick={() => onSuggestFix({ key: item.key, summary: item.summary, missingItems: item.missing_fields })}
+                      className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap shrink-0"
+                    >
+                      Suggest Fix
+                    </button>
                   </div>
                   <div className="flex flex-wrap gap-1 mb-1">
                     {item.missing_fields?.map((field) => (
@@ -495,9 +502,15 @@ function ArchitectureReport({ report }) {
                   <div key={item.key} className="px-4 py-3">
                     <div className="flex items-center gap-2 mb-1">
                       <JiraLink ticketKey={item.key} />
-                      <span className="text-sm text-gray-700">
+                      <span className="text-sm text-gray-700 flex-1">
                         {item.current_summary}
                       </span>
+                      <button
+                        onClick={() => onSuggestFix({ key: item.key, summary: item.current_summary })}
+                        className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap shrink-0"
+                      >
+                        Suggest Fix
+                      </button>
                     </div>
                     <p className="text-xs text-gray-500 mb-2">
                       {item.reason}
@@ -578,6 +591,13 @@ function ArchitectureReport({ report }) {
                 >
                   <div className="flex items-center gap-2 mb-1">
                     <JiraLink ticketKey={item.key} />
+                    <span className="flex-1" />
+                    <button
+                      onClick={() => onSuggestFix({ key: item.key, summary: item.current_name })}
+                      className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap shrink-0"
+                    >
+                      Suggest Fix
+                    </button>
                   </div>
                   <div className="text-sm text-red-400 line-through">
                     {item.current_name}
@@ -619,6 +639,12 @@ function ArchitectureReport({ report }) {
                   <span className="text-xs text-gray-500 flex-1">
                     {item.reason}
                   </span>
+                  <button
+                    onClick={() => onSuggestFix({ key: item.key, summary: item.reason, priority: item.current_priority })}
+                    className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap shrink-0"
+                  >
+                    Suggest Fix
+                  </button>
                 </div>
               ))}
             </div>
@@ -702,6 +728,7 @@ export default function ArchitecturePage() {
   const [copied, setCopied] = useState(false);
   const [jsonInput, setJsonInput] = useState("");
   const [parseError, setParseError] = useState(null);
+  const [diffTicket, setDiffTicket] = useState(null);
   const [report, setReport] = useState(() => {
     if (typeof window === "undefined") return null;
     try {
@@ -1108,7 +1135,7 @@ export default function ArchitecturePage() {
                 Clear Report
               </button>
             </div>
-            <ArchitectureReport report={report} />
+            <ArchitectureReport report={report} onSuggestFix={setDiffTicket} />
           </div>
         )}
 
@@ -1126,6 +1153,14 @@ export default function ArchitecturePage() {
           </div>
         )}
       </main>
+
+      {diffTicket && (
+        <TicketDiffModal
+          ticket={diffTicket}
+          onClose={() => setDiffTicket(null)}
+          jiraBaseUrl={jiraBaseUrl}
+        />
+      )}
     </div>
   );
 }

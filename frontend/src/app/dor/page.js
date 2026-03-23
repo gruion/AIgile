@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { fetchDoR } from "../../lib/api";
 import AiCoachPanel from "../../components/AiCoachPanel";
+import TicketDiffModal from "../../components/TicketDiffModal";
 import JqlBar from "../../components/JqlBar";
 import ResizableTable from "../../components/ResizableTable";
 import { toast } from "../../components/Toaster";
@@ -92,6 +93,7 @@ export default function DoRPage() {
   const [error, setError] = useState(null);
   const [jql, setJql] = useState("");
   const [inputJql, setInputJql] = useState("");
+  const [diffTicket, setDiffTicket] = useState(null);
 
   const load = useCallback(async (query) => {
     setLoading(true);
@@ -214,6 +216,22 @@ export default function DoRPage() {
         render: (row) => (
           <span className="text-xs text-gray-600">{row.priority || "—"}</span>
         ),
+      },
+      {
+        key: "_actions",
+        label: "",
+        sortable: false,
+        defaultWidth: 90,
+        minWidth: 70,
+        render: (row) =>
+          !row.isReady ? (
+            <button
+              onClick={() => setDiffTicket(row)}
+              className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap"
+            >
+              Suggest Fix
+            </button>
+          ) : null,
       },
     ],
     [jiraBaseUrl]
@@ -407,6 +425,14 @@ export default function DoRPage() {
           </div>
         )}
       </main>
+
+      {diffTicket && (
+        <TicketDiffModal
+          ticket={diffTicket}
+          onClose={() => setDiffTicket(null)}
+          jiraBaseUrl={jiraBaseUrl}
+        />
+      )}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useMemo } from "react";
 import FilterBar from "../../components/FilterBar";
 import JqlBar from "../../components/JqlBar";
 import ResizableTable from "../../components/ResizableTable";
+import TicketDiffModal from "../../components/TicketDiffModal";
 import { fetchIssues, fetchSettings } from "../../lib/api";
 import { selectTicketsForPrompt, formatTicketForPrompt, trimPrompt } from "../../lib/prompt-utils";
 import { toast } from "../../components/Toaster";
@@ -288,7 +289,7 @@ function CopyButton({ text, label = "Copy" }) {
 
 // ─── Report Renderer ────────────────────────────────────
 
-function AnalysisReport({ report }) {
+function AnalysisReport({ report, onSuggestFix }) {
   const [expandedSection, setExpandedSection] = useState("actions");
 
   const bh = report.board_health || {};
@@ -430,6 +431,17 @@ function AnalysisReport({ report }) {
               key: "action", label: "Action", sortable: false, defaultWidth: 200, minWidth: 100,
               className: "text-gray-700",
               render: (row) => row.action,
+            },
+            {
+              key: "_fix", label: "", sortable: false, defaultWidth: 90, minWidth: 70,
+              render: (row) => (
+                <button
+                  onClick={() => onSuggestFix({ key: row.ticket_key, summary: row.ticket_summary, assignee: row.assignee, missingItems: row.missing })}
+                  className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap"
+                >
+                  Suggest Fix
+                </button>
+              ),
             },
           ]}
           data={report.missing_info_audit}
@@ -706,6 +718,7 @@ export default function AnalyzePage() {
   const [pasteText, setPasteText] = useState("");
   const [report, setReport] = useState(null);
   const [parseError, setParseError] = useState(null);
+  const [diffTicket, setDiffTicket] = useState(null);
   const [missingInfoCriteria, setMissingInfoCriteria] = useState("");
   const [promptSettings, setPromptSettings] = useState({
     maxTickets: 100,
@@ -1021,7 +1034,7 @@ export default function AnalyzePage() {
             )}
 
             {/* TAB: Report */}
-            {tab === "report" && report && <AnalysisReport report={report} />}
+            {tab === "report" && report && <AnalysisReport report={report} onSuggestFix={setDiffTicket} />}
           </>
         )}
 
@@ -1039,6 +1052,14 @@ export default function AnalyzePage() {
           </div>
         )}
       </main>
+
+      {diffTicket && (
+        <TicketDiffModal
+          ticket={diffTicket}
+          onClose={() => setDiffTicket(null)}
+          jiraBaseUrl={jiraBaseUrl}
+        />
+      )}
     </div>
   );
 }

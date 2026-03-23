@@ -6,6 +6,7 @@ import AiCoachPanel from "../../components/AiCoachPanel";
 import JqlBar from "../../components/JqlBar";
 import { toast } from "../../components/Toaster";
 import { useAppConfig } from "../../context/AppConfigContext";
+import TicketDiffModal from "../../components/TicketDiffModal";
 
 const STATUS_BADGE = {
   done: "bg-green-100 text-green-700",
@@ -86,7 +87,7 @@ function StatusBadge({ status, category }) {
   return <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${cls}`}>{status}</span>;
 }
 
-function EpicCard({ epic, defaultOpen, jiraBaseUrl }) {
+function EpicCard({ epic, defaultOpen, jiraBaseUrl, onSuggestFix }) {
   const [open, setOpen] = useState(defaultOpen);
   const pct = epic.total > 0 ? Math.round((epic.done / epic.total) * 100) : 0;
 
@@ -124,9 +125,14 @@ function EpicCard({ epic, defaultOpen, jiraBaseUrl }) {
                 {issue.key}
               </a>
               <span className="text-gray-700 truncate">{issue.summary}</span>
-              {issue.assignee && (
-                <span className="ml-auto text-xs text-gray-400 shrink-0">{issue.assignee}</span>
-              )}
+              <div className="ml-auto flex items-center gap-2 shrink-0">
+                {onSuggestFix && (
+                  <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+                )}
+                {issue.assignee && (
+                  <span className="text-xs text-gray-400 shrink-0">{issue.assignee}</span>
+                )}
+              </div>
             </div>
           ))}
           {(!epic.issues || epic.issues.length === 0) && (
@@ -167,6 +173,7 @@ const AI_PROMPTS = [
 
 export default function SprintReviewPage() {
   const { defaultJql, jiraBaseUrl } = useAppConfig();
+  const [diffTicket, setDiffTicket] = useState(null);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -377,7 +384,7 @@ export default function SprintReviewPage() {
             <h2 className="text-lg font-semibold text-gray-800 mb-3">By Epic</h2>
             <div className="space-y-3">
               {epicGroups.map((epic, idx) => (
-                <EpicCard key={epic.key || idx} epic={epic} defaultOpen={idx === 0} jiraBaseUrl={jiraBaseUrl} />
+                <EpicCard key={epic.key || idx} epic={epic} defaultOpen={idx === 0} jiraBaseUrl={jiraBaseUrl} onSuggestFix={setDiffTicket} />
               ))}
             </div>
           </div>
@@ -404,6 +411,8 @@ export default function SprintReviewPage() {
         </div>
 
       </div>
+
+      {diffTicket && <TicketDiffModal ticket={diffTicket} onClose={() => setDiffTicket(null)} jiraBaseUrl={jiraBaseUrl} />}
     </div>
   );
 }

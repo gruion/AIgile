@@ -7,6 +7,7 @@ import IssueHoverCard from "../../components/IssueHoverCard";
 import { fetchIssues } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 import AiCoachPanel from "../../components/AiCoachPanel";
+import TicketDiffModal from "../../components/TicketDiffModal";
 import { useAppConfig } from "../../context/AppConfigContext";
 
 // ─── Color palette for epics ────────────────────────────
@@ -271,6 +272,7 @@ export default function GanttPage() {
   const [jql, setJql] = useState("");
   const [inputJql, setInputJql] = useState("");
   const [hoveredRow, setHoveredRow] = useState(null);
+  const [diffTicket, setDiffTicket] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [hiddenEpics, setHiddenEpics] = useState(new Set());
   const [showDeps, setShowDeps] = useState(true);
@@ -541,6 +543,7 @@ export default function GanttPage() {
                         : item.statusCategory === "indeterminate" ? "bg-blue-100 text-blue-700"
                         : "bg-gray-100 text-gray-600"
                       }`}>{item.status}</span>
+                      <button onClick={() => setDiffTicket(item)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
                     </div>
                   );
                 })}
@@ -676,6 +679,7 @@ export default function GanttPage() {
         )}
 
       </main>
+      {diffTicket && <TicketDiffModal ticket={diffTicket} onClose={() => setDiffTicket(null)} jiraBaseUrl={jiraBaseUrl} />}
     </div>
   );
 }

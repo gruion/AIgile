@@ -7,6 +7,7 @@ import { fetchEpicDetail } from "../../../lib/api";
 import ResizableTable from "../../../components/ResizableTable";
 import IssueHoverCard from "../../../components/IssueHoverCard";
 import { useAppConfig } from "../../../context/AppConfigContext";
+import TicketDiffModal from "../../../components/TicketDiffModal";
 
 // ─── Prompt builder (asks AI to return structured JSON) ──
 
@@ -260,7 +261,7 @@ const TICKET_SORT_FN = (a, b, key) => {
   return String(a[key] || "").localeCompare(String(b[key] || ""));
 };
 
-const getTicketTableColumns = (jiraBaseUrl) => [
+const getTicketTableColumns = (jiraBaseUrl, onSuggestFix) => [
   {
     key: "ticket", label: "Ticket", sortable: true, defaultWidth: 200, minWidth: 120,
     render: (row) => (
@@ -317,10 +318,21 @@ const getTicketTableColumns = (jiraBaseUrl) => [
     className: "text-gray-700 truncate",
     render: (row) => row.next_action || "—",
   },
+  {
+    key: "suggestFix", label: "AI Fix", sortable: false, defaultWidth: 90, minWidth: 70,
+    render: (row) => (
+      <button
+        onClick={() => onSuggestFix?.(row)}
+        className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap"
+      >
+        Suggest Fix
+      </button>
+    ),
+  },
 ];
 
-function TicketTable({ tickets, jiraBaseUrl }) {
-  const columns = useMemo(() => getTicketTableColumns(jiraBaseUrl), [jiraBaseUrl]);
+function TicketTable({ tickets, jiraBaseUrl, onSuggestFix }) {
+  const columns = useMemo(() => getTicketTableColumns(jiraBaseUrl, onSuggestFix), [jiraBaseUrl, onSuggestFix]);
   return (
     <ResizableTable
       columns={columns}
@@ -425,7 +437,7 @@ function TeamWorkload({ team }) {
   );
 }
 
-function ReportRenderer({ report, jiraBaseUrl }) {
+function ReportRenderer({ report, jiraBaseUrl, onSuggestFix }) {
   const [view, setView] = useState("table");
   return (
     <div className="space-y-6">
@@ -452,7 +464,7 @@ function ReportRenderer({ report, jiraBaseUrl }) {
             </div>
           </div>
           {view === "table" ? (
-            <TicketTable tickets={report.tickets} jiraBaseUrl={jiraBaseUrl} />
+            <TicketTable tickets={report.tickets} jiraBaseUrl={jiraBaseUrl} onSuggestFix={onSuggestFix} />
           ) : (
             <TicketDetailCards tickets={report.tickets} />
           )}
@@ -555,6 +567,7 @@ export default function EpicDetailPage() {
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
   const [tab, setTab] = useState("data"); // data | prompt | report
+  const [diffTicket, setDiffTicket] = useState(null);
   const [pasteText, setPasteText] = useState("");
   const [report, setReport] = useState(null);
   const [parseError, setParseError] = useState(null);
@@ -801,11 +814,19 @@ export default function EpicDetailPage() {
 
             {/* ─── TAB: Report ─── */}
             {tab === "report" && report && (
-              <ReportRenderer report={report} jiraBaseUrl={jiraBaseUrl} />
+              <ReportRenderer report={report} jiraBaseUrl={jiraBaseUrl} onSuggestFix={setDiffTicket} />
             )}
           </>
         )}
       </main>
+
+      {diffTicket && (
+        <TicketDiffModal
+          ticket={diffTicket}
+          onClose={() => setDiffTicket(null)}
+          jiraBaseUrl={jiraBaseUrl}
+        />
+      )}
     </div>
   );
 }

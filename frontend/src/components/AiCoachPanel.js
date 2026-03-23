@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
+import { askAiCoach } from "../lib/api";
 
 /**
  * AiCoachPanel — prompt generator + paste-back AI coaching panel.
@@ -26,32 +27,32 @@ export default function AiCoachPanel({ context, data, prompts = [], title = "AI 
   const [activePrompt, setActivePrompt] = useState(null);
   const [customQ, setCustomQ] = useState("");
   const [copied, setCopied] = useState(false);
-  const [step, setStep] = useState("idle"); // idle | prompt | response
+  const [step, setStep] = useState("idle"); // idle | prompt | response | loading
+  const [aiError, setAiError] = useState("");
   const promptRef = useRef(null);
 
-  function buildPrompt(question) {
-    const dataStr = data ? JSON.stringify(data, null, 2).substring(0, 8000) : "No data available";
-
-    return `You are an experienced Agile Coach and Scrum Master. You help teams improve their agile practices, identify process issues, and suggest actionable improvements.
-
-CONTEXT: ${context}
-
-DATA:
-${dataStr}
-
-USER QUESTION: ${question}
-
-Provide a helpful, actionable response. Be specific and reference the data when possible. Keep your response concise but thorough. Use bullet points for recommendations. If suggesting process changes, explain the "why" behind each suggestion.`;
-  }
-
-  function handleSelectPrompt(question, label) {
-    const prompt = buildPrompt(question);
-    setGeneratedPrompt(prompt);
+  async function handleSelectPrompt(question, label) {
     setActivePrompt(label || question);
     setPastedResponse("");
     setDisplayedResponse("");
     setCopied(false);
-    setStep("prompt");
+    setAiError("");
+    setStep("loading");
+    try {
+      const result = await askAiCoach(context, question, data);
+      setGeneratedPrompt(result.prompt || "");
+      if (result.answer) {
+        // Provider returned a direct answer
+        setDisplayedResponse(result.answer);
+        setStep("response");
+      } else {
+        // Manual copy/paste mode
+        setStep("prompt");
+      }
+    } catch (err) {
+      setAiError(err.message);
+      setStep("idle");
+    }
   }
 
   function handleCustomSubmit(e) {
@@ -103,7 +104,7 @@ Provide a helpful, actionable response. Be specific and reference the data when 
             </svg>
           </div>
           <h3 className="text-sm font-semibold text-indigo-900">{title}</h3>
-          <span className="text-[10px] text-indigo-400 ml-auto mr-2">Copy prompt → Paste in chatbot → Paste response back</span>
+          <span className="text-[10px] text-indigo-400 ml-auto mr-2">AI-powered agile coaching</span>
           <svg className={`w-4 h-4 text-indigo-400 transition-transform ${open ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
@@ -111,6 +112,19 @@ Provide a helpful, actionable response. Be specific and reference the data when 
       </button>
 
       {open && (<>
+      {/* Loading state */}
+      {step === "loading" && (
+        <div className="px-4 py-6 flex items-center justify-center gap-3 text-indigo-600">
+          <div className="animate-spin h-5 w-5 border-2 border-indigo-300 border-t-indigo-600 rounded-full" />
+          <span className="text-sm">Asking AI Coach...</span>
+        </div>
+      )}
+
+      {/* Error */}
+      {aiError && step === "idle" && (
+        <div className="px-4 py-2 text-xs text-red-600 bg-red-50 border-t border-red-200">{aiError}</div>
+      )}
+
       {/* Step: Idle — show prompt buttons */}
       {step === "idle" && (
         <div className="px-4 py-3 space-y-2">
@@ -167,7 +181,7 @@ Provide a helpful, actionable response. Be specific and reference the data when 
           <div>
             <div className="flex items-center justify-between mb-1">
               <p className="text-[10px] uppercase font-semibold text-indigo-400 tracking-wider">
-                Step 1: Copy this prompt to your AI chatbot
+                Copy this prompt to your AI chatbot (ChatGPT, Claude, etc.)
               </p>
               <button
                 onClick={handleCopy}

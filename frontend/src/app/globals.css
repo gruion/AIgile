@@ -16,6 +16,9 @@
 body.sidebar-collapsed #main-content {
   margin-left: 3.5rem; /* w-14 = 3.5rem */
 }
+body.no-sidebar #main-content {
+  margin-left: 0;
+}
 
 ::-webkit-scrollbar {
   width: 6px;

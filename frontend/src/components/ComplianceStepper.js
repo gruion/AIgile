@@ -9,7 +9,7 @@ const STATUS_STYLES = {
   critical: { card: "border-red-400 bg-red-100", badge: "bg-red-200 text-red-800", bar: "bg-red-600" },
 };
 
-export default function ComplianceStepper({ checks, onReload, loading }) {
+export default function ComplianceStepper({ checks, onReload, loading, onSuggestFix }) {
   const [currentStep, setCurrentStep] = useState(0);
   const [reloadingStep, setReloadingStep] = useState(false);
 
@@ -123,15 +123,24 @@ export default function ComplianceStepper({ checks, onReload, loading }) {
               <div className="text-[10px] font-medium text-gray-500 uppercase tracking-wider">{check.action.label}</div>
               <div className="flex flex-wrap gap-1.5">
                 {check.action.keys.map((key) => (
-                  <a
-                    key={key}
-                    href={`${check.action.serverUrl}/browse/${key}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs font-mono text-blue-600 bg-white rounded px-2.5 py-1.5 hover:bg-blue-50 hover:underline border border-blue-200 transition-colors"
-                  >
-                    {key}
-                  </a>
+                  <span key={key} className="inline-flex flex-col items-center gap-1">
+                    <a
+                      href={`${check.action.serverUrl}/browse/${key}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs font-mono text-blue-600 bg-white rounded px-2.5 py-1.5 hover:bg-blue-50 hover:underline border border-blue-200 transition-colors"
+                    >
+                      {key}
+                    </a>
+                    {onSuggestFix && (
+                      <button
+                        onClick={() => onSuggestFix({ key, summary: check.name, checks: [check], missingItems: [check.name] })}
+                        className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors"
+                      >
+                        Suggest Fix
+                      </button>
+                    )}
+                  </span>
                 ))}
               </div>
             </div>
@@ -152,20 +161,33 @@ export default function ComplianceStepper({ checks, onReload, loading }) {
             &larr; Previous
           </button>
 
-          <button
-            onClick={handleReload}
-            disabled={reloadingStep || loading}
-            className="text-sm px-4 py-2 rounded-lg bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-2"
-          >
-            {reloadingStep || loading ? (
-              <>
-                <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-gray-300 border-t-blue-500 rounded-full" />
-                Checking...
-              </>
-            ) : (
-              <>&#8635; Reload &amp; Verify</>
+          <div className="flex items-center gap-2">
+            {onSuggestFix && (
+              <button
+                onClick={() => {
+                  const ticketKey = check.action?.keys?.[0] || check.id;
+                  onSuggestFix({ key: ticketKey, summary: check.name, checks: [check], missingItems: [check.name] });
+                }}
+                className="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white transition-colors"
+              >
+                Suggest Fix
+              </button>
             )}
-          </button>
+            <button
+              onClick={handleReload}
+              disabled={reloadingStep || loading}
+              className="text-sm px-4 py-2 rounded-lg bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-2"
+            >
+              {reloadingStep || loading ? (
+                <>
+                  <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-gray-300 border-t-blue-500 rounded-full" />
+                  Checking...
+                </>
+              ) : (
+                <>&#8635; Reload &amp; Verify</>
+              )}
+            </button>
+          </div>
 
           <button
             onClick={() => setCurrentStep(Math.min(failingChecks.length - 1, step + 1))}

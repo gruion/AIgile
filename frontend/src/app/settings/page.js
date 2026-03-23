@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { fetchSettings, updateSettings, fetchConfig, updateConfig, fetchPiCompliance, testConnection, importConfig } from "../../lib/api";
+import { fetchSettings, updateSettings, fetchConfig, updateConfig, testConnection, importConfig, fetchAiSettings, updateAiSettings } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 
 const EXAMPLE_TEMPLATES = [
@@ -64,35 +64,30 @@ export default function SettingsPage() {
   const [error, setError] = useState(null);
 
   // Multi-server / team config
-  const [piConfig, setPiConfig] = useState({ name: "", startDate: "", endDate: "", sprintCount: 5, sprintDuration: 14, enabled: false });
   const [teams, setTeams] = useState([]);
   const [servers, setServers] = useState([]);
   const [configSource, setConfigSource] = useState("");
   const [defaultTeamId, setDefaultTeamId] = useState("");
-  const [programBoard, setProgramBoard] = useState({ projectKey: "", serverId: "primary" });
-  const [disabledPiChecks, setDisabledPiChecks] = useState([]);
-  const [allPiChecks, setAllPiChecks] = useState([]);
-  const [complianceResult, setComplianceResult] = useState(null);
-  const [verifying, setVerifying] = useState(false);
   const [configJsonText, setConfigJsonText] = useState("");
   const [importing, setImporting] = useState(false);
 
+  // AI provider config
+  const [aiConfig, setAiConfig] = useState({ provider: "", model: "", apiKey: "", baseUrl: "", enabled: false, hasApiKey: false });
+  const [aiSaving, setAiSaving] = useState(false);
+  const [aiSaved, setAiSaved] = useState(false);
+
   useEffect(() => {
-    Promise.all([fetchSettings(), fetchConfig(), fetchPiCompliance().catch(() => null)])
-      .then(([s, cfg, piCompliance]) => {
+    Promise.all([fetchSettings(), fetchConfig(), fetchAiSettings().catch(() => null)])
+      .then(([s, cfg, ai]) => {
         setSettings(s);
         setTemplate(s.epicChildrenJqlTemplate || "");
         setMissingInfoCriteria(s.missingInfoCriteria || DEFAULT_MISSING_INFO);
         if (s.promptSettings) setPromptSettings((prev) => ({ ...prev, ...s.promptSettings }));
-        if (cfg.piConfig) setPiConfig(cfg.piConfig);
         if (cfg.teams) setTeams(cfg.teams);
         if (cfg.servers) setServers(cfg.servers.map((s, i) => ({ ...s, _key: `srv-${i}-${Date.now()}` })));
         if (cfg.configSource) setConfigSource(cfg.configSource);
         if (cfg.defaultTeamId !== undefined) setDefaultTeamId(cfg.defaultTeamId);
-        if (cfg.programBoard) setProgramBoard(cfg.programBoard);
-        if (cfg.disabledPiChecks) setDisabledPiChecks(cfg.disabledPiChecks);
-        if (piCompliance?.allCheckIds) setAllPiChecks(piCompliance.allCheckIds);
-        if (piCompliance) setComplianceResult(piCompliance);
+        if (ai) setAiConfig((prev) => ({ ...prev, ...ai, apiKey: "" }));
       })
       .catch((err) => { setError(err.message); toast.error("Failed to load settings"); })
       .finally(() => setLoading(false));
@@ -116,11 +111,10 @@ export default function SettingsPage() {
       }));
       const [result, cfgResult] = await Promise.all([
         updateSettings({ epicChildrenJqlTemplate: template, missingInfoCriteria, promptSettings }),
-        updateConfig({ teams, piConfig, servers: serverPayloads, programBoard, defaultTeamId, disabledPiChecks }),
+        updateConfig({ teams, servers: serverPayloads, defaultTeamId }),
       ]);
       setSettings((prev) => ({ ...prev, ...result }));
       if (cfgResult.servers) setServers(cfgResult.servers);
-      if (cfgResult.piConfig) setPiConfig(cfgResult.piConfig);
       if (cfgResult.configSource) setConfigSource(cfgResult.configSource);
       setSaved(true);
       toast.success("Settings saved successfully");
@@ -130,6 +124,23 @@ export default function SettingsPage() {
       toast.error("Failed to save settings: " + err.message);
     }
     setSaving(false);
+  };
+
+  const handleSaveAi = async () => {
+    setAiSaving(true);
+    setAiSaved(false);
+    try {
+      const payload = { provider: aiConfig.provider, model: aiConfig.model, baseUrl: aiConfig.baseUrl, enabled: aiConfig.enabled };
+      if (aiConfig.apiKey) payload.apiKey = aiConfig.apiKey;
+      const result = await updateAiSettings(payload);
+      setAiConfig((prev) => ({ ...prev, ...result, apiKey: "" }));
+      setAiSaved(true);
+      toast.success("AI settings saved");
+      setTimeout(() => setAiSaved(false), 3000);
+    } catch (err) {
+      toast.error("Failed to save AI settings: " + err.message);
+    }
+    setAiSaving(false);
   };
 
   const testJql = template
@@ -566,113 +577,14 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            {/* PI Planning / Multi-Team Config */}
+            {/* Teams Configuration */}
             <div className="bg-white rounded-xl border border-gray-200 p-6">
               <h3 className="text-sm font-semibold text-gray-800 mb-1">
-                PI Planning Configuration
+                Teams Configuration
               </h3>
               <p className="text-xs text-gray-500 mb-4">
-                Configure your Program Increment, teams, and program board.
+                Configure your teams and default team settings.
               </p>
-
-              {/* PI Config */}
-              <div className="flex items-center justify-between mb-3">
-                <label className="text-xs text-gray-600 font-medium">Sprint Configuration</label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <span className="text-[10px] text-gray-400">{piConfig.enabled !== false ? "PI Sprint Mode" : "JQL-Only Mode"}</span>
-                  <div
-                    onClick={async () => {
-                      const newEnabled = piConfig.enabled === false ? true : false;
-                      const newPiConfig = { ...piConfig, enabled: newEnabled };
-                      setPiConfig(newPiConfig);
-                      try {
-                        const result = await updateConfig({ piConfig: newPiConfig });
-                        if (result.piConfig) setPiConfig(result.piConfig);
-                        if (result.configSource) setConfigSource(result.configSource);
-                        toast.success(newEnabled ? "PI Sprint Mode enabled" : "JQL-Only Mode enabled");
-                      } catch (err) {
-                        setPiConfig((p) => ({ ...p, enabled: !newEnabled }));
-                        toast.error("Failed to save mode: " + err.message);
-                      }
-                    }}
-                    className={`relative w-10 h-5 rounded-full transition-colors cursor-pointer ${piConfig.enabled !== false ? "bg-blue-600" : "bg-gray-300"}`}
-                  >
-                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${piConfig.enabled !== false ? "translate-x-5" : "translate-x-0.5"}`} />
-                  </div>
-                </label>
-              </div>
-              {piConfig.enabled === false && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 text-xs text-amber-700 mb-3">
-                  Sprint configuration disabled. Teams will be analyzed using their JQL queries without PI date filtering.
-                </div>
-              )}
-              <div className={`grid grid-cols-4 gap-3 mb-6 transition-opacity ${piConfig.enabled === false ? "opacity-40 pointer-events-none" : ""}`}>
-                <div>
-                  <label className="text-xs text-gray-600 font-medium">PI Name</label>
-                  <input
-                    type="text" value={piConfig.name || ""}
-                    onChange={(e) => setPiConfig((p) => ({ ...p, name: e.target.value }))}
-                    placeholder="PI 2026-Q1"
-                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 font-medium">Start Date</label>
-                  <input
-                    type="date" value={piConfig.startDate || ""}
-                    onChange={(e) => setPiConfig((p) => ({ ...p, startDate: e.target.value }))}
-                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 font-medium">End Date</label>
-                  <input
-                    type="date" value={piConfig.endDate || ""}
-                    onChange={(e) => setPiConfig((p) => ({ ...p, endDate: e.target.value }))}
-                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 font-medium">Sprints / Duration (days)</label>
-                  <div className="flex gap-2 mt-1">
-                    <input
-                      type="number" value={piConfig.sprintCount || 5} min={1} max={20}
-                      onChange={(e) => setPiConfig((p) => ({ ...p, sprintCount: parseInt(e.target.value) }))}
-                      className="w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
-                    />
-                    <input
-                      type="number" value={piConfig.sprintDuration || 14} min={7} max={30}
-                      onChange={(e) => setPiConfig((p) => ({ ...p, sprintDuration: parseInt(e.target.value) }))}
-                      className="w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Program Board */}
-              <div className="grid grid-cols-2 gap-3 mb-6">
-                <div>
-                  <label className="text-xs text-gray-600 font-medium">Program Board Project Key</label>
-                  <input
-                    type="text" value={programBoard.projectKey || ""} placeholder="PROGRAM"
-                    onChange={(e) => setProgramBoard((p) => ({ ...p, projectKey: e.target.value.toUpperCase() }))}
-                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 font-mono"
-                  />
-                  <p className="text-[10px] text-gray-400 mt-1">The parent project with high-level Features that link to team work</p>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 font-medium">Program Board Server</label>
-                  <select
-                    value={programBoard.serverId || "primary"}
-                    onChange={(e) => setProgramBoard((p) => ({ ...p, serverId: e.target.value }))}
-                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
-                  >
-                    {servers.map((s) => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
 
               {/* Teams */}
               <div className="mb-4">
@@ -728,7 +640,7 @@ export default function SettingsPage() {
                     </div>
                   ))}
                   {teams.length === 0 && (
-                    <p className="text-xs text-gray-400 text-center py-3">No teams configured. Add a team to use PI Planning.</p>
+                    <p className="text-xs text-gray-400 text-center py-3">No teams configured. Add a team to get started.</p>
                   )}
                 </div>
               </div>
@@ -752,122 +664,12 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            {/* PI Compliance Checks */}
-            {allPiChecks.length > 0 && (
-              <div className="bg-white rounded-xl border border-gray-200 p-6">
-                <div className="flex items-center justify-between mb-1">
-                  <h3 className="text-sm font-semibold text-gray-800">PI Compliance Checks</h3>
-                  <button
-                    onClick={async () => {
-                      setVerifying(true);
-                      try {
-                        await updateConfig({ disabledPiChecks });
-                        const result = await fetchPiCompliance();
-                        setComplianceResult(result);
-                        if (result.allCheckIds) setAllPiChecks(result.allCheckIds);
-                        toast.success(`Compliance score: ${result.score}% (${result.checks?.length || 0} active checks)`);
-                      } catch (err) {
-                        toast.error("Failed to verify compliance: " + err.message);
-                      }
-                      setVerifying(false);
-                    }}
-                    disabled={verifying}
-                    className="text-xs bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white px-3 py-1.5 rounded-md transition-colors"
-                  >
-                    {verifying ? "Verifying..." : "Reload & Verify"}
-                  </button>
-                </div>
-                <p className="text-xs text-gray-500 mb-4">
-                  Disable checks to exclude them from the PI compliance score.
-                </p>
-
-                {/* Compliance score summary */}
-                {complianceResult && (
-                  <div className={`rounded-lg border px-4 py-3 mb-4 ${
-                    complianceResult.score >= 80 ? "bg-green-50 border-green-200" :
-                    complianceResult.score >= 50 ? "bg-amber-50 border-amber-200" :
-                    "bg-red-50 border-red-200"
-                  }`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className={`text-sm font-bold ${
-                        complianceResult.score >= 80 ? "text-green-700" :
-                        complianceResult.score >= 50 ? "text-amber-700" :
-                        "text-red-700"
-                      }`}>
-                        Compliance Score: {complianceResult.score}%
-                      </span>
-                      <span className="text-[10px] text-gray-400">
-                        {complianceResult.totalScore}/{complianceResult.maxPossible} points
-                        {" · "}{complianceResult.totalIssues} issues · {complianceResult.teamCount} teams
-                      </span>
-                    </div>
-                    <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                      <div
-                        className={`h-2 rounded-full transition-all ${
-                          complianceResult.score >= 80 ? "bg-green-500" :
-                          complianceResult.score >= 50 ? "bg-amber-500" :
-                          "bg-red-500"
-                        }`}
-                        style={{ width: `${complianceResult.score}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* Checks with toggle + score */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                  {allPiChecks.map((check) => {
-                    const isDisabled = disabledPiChecks.includes(check.id);
-                    const result = complianceResult?.checks?.find((c) => c.id === check.id);
-                    const scoreBg = !result ? "" :
-                      result.score >= 8 ? "bg-green-50 border-green-200" :
-                      result.score >= 5 ? "bg-amber-50 border-amber-200" :
-                      "bg-red-50 border-red-200";
-                    return (
-                      <label key={check.id} className={`flex items-center gap-2 text-xs px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
-                        isDisabled ? "bg-gray-50 border-gray-200 text-gray-400" :
-                        result ? scoreBg : "bg-green-50 border-green-200 text-gray-700"
-                      }`}>
-                        <input
-                          type="checkbox"
-                          checked={!isDisabled}
-                          onChange={() => {
-                            setDisabledPiChecks((prev) =>
-                              isDisabled
-                                ? prev.filter((id) => id !== check.id)
-                                : [...prev, check.id]
-                            );
-                          }}
-                          className="rounded border-gray-300 shrink-0"
-                        />
-                        <span className="flex-1 min-w-0 truncate">{check.name}</span>
-                        {result && !isDisabled && (
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {result.detail && <span className="text-[10px] text-gray-400 max-w-[150px] truncate hidden lg:inline">{result.detail}</span>}
-                            <span className={`font-bold text-[11px] ${
-                              result.score >= 8 ? "text-green-600" :
-                              result.score >= 5 ? "text-amber-600" :
-                              "text-red-600"
-                            }`}>{result.score}/{result.maxScore}</span>
-                          </div>
-                        )}
-                        {isDisabled && <span className="text-[10px] text-gray-400 shrink-0">off</span>}
-                      </label>
-                    );
-                  })}
-                </div>
-                <p className="text-[10px] text-gray-400 mt-3">
-                  Toggle checks on/off, then click "Reload & Verify" to save and re-score compliance against live Jira data.
-                </p>
-              </div>
-            )}
-
             {/* Config Import / Export */}
             <div className="bg-white rounded-xl border border-gray-200 p-6">
               <h3 className="text-sm font-semibold text-gray-800 mb-1">Import / Export Configuration</h3>
               <p className="text-xs text-gray-500 mb-4">
                 Paste a <code className="bg-gray-100 px-1 rounded">config.json</code> to override the current configuration.
-                This replaces servers, teams, PI config, and all other settings.
+                This replaces servers, teams, and all other settings.
               </p>
 
               {/* Export */}
@@ -918,10 +720,7 @@ export default function SettingsPage() {
                       // Reload page state with imported config
                       if (result.servers) setServers(result.servers.map((s, i) => ({ ...s, _key: `srv-${i}-${Date.now()}` })));
                       if (result.teams) setTeams(result.teams);
-                      if (result.piConfig) setPiConfig(result.piConfig);
-                      if (result.programBoard) setProgramBoard(result.programBoard);
                       if (result.defaultTeamId !== undefined) setDefaultTeamId(result.defaultTeamId);
-                      if (result.disabledPiChecks) setDisabledPiChecks(result.disabledPiChecks);
                       if (result.configSource) setConfigSource(result.configSource);
                       toast.success("Configuration imported successfully");
                       setConfigJsonText("");
@@ -964,6 +763,143 @@ export default function SettingsPage() {
                 If neither "Epic Link" nor "parent" works for your Jira, set a custom template above.
                 Common alternatives: labels, components, or custom field IDs.
               </p>
+            </div>
+
+            {/* ─── AI Provider ─── */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-800">AI Provider</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">Connect your own AI API key to power the AI Coach feature</p>
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <span className="text-xs text-gray-600">{aiConfig.enabled ? "Enabled" : "Disabled"}</span>
+                  <div
+                    onClick={() => setAiConfig((p) => ({ ...p, enabled: !p.enabled }))}
+                    className={`relative w-9 h-5 rounded-full cursor-pointer transition-colors ${aiConfig.enabled ? "bg-blue-600" : "bg-gray-300"}`}
+                  >
+                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${aiConfig.enabled ? "translate-x-4" : "translate-x-0.5"}`} />
+                  </div>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Provider</label>
+                  <select
+                    value={aiConfig.provider}
+                    onChange={(e) => setAiConfig((p) => ({ ...p, provider: e.target.value, model: "" }))}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                  >
+                    <option value="">— Select provider —</option>
+                    <option value="openai">OpenAI (ChatGPT)</option>
+                    <option value="anthropic">Anthropic (Claude)</option>
+                    <option value="mistral">Mistral AI</option>
+                    <option value="ollama">Ollama (local)</option>
+                    <option value="custom">Custom / OpenAI-compatible</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Model</label>
+                  {aiConfig.provider === "openai" ? (
+                    <select
+                      value={aiConfig.model}
+                      onChange={(e) => setAiConfig((p) => ({ ...p, model: e.target.value }))}
+                      className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                    >
+                      <option value="">Default (gpt-4o-mini)</option>
+                      <option value="gpt-4o-mini">gpt-4o-mini</option>
+                      <option value="gpt-4o">gpt-4o</option>
+                      <option value="gpt-4-turbo">gpt-4-turbo</option>
+                      <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+                    </select>
+                  ) : aiConfig.provider === "anthropic" ? (
+                    <select
+                      value={aiConfig.model}
+                      onChange={(e) => setAiConfig((p) => ({ ...p, model: e.target.value }))}
+                      className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                    >
+                      <option value="">Default (claude-haiku)</option>
+                      <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fast)</option>
+                      <option value="claude-sonnet-4-5">claude-sonnet-4-5</option>
+                      <option value="claude-opus-4-5">claude-opus-4-5</option>
+                    </select>
+                  ) : aiConfig.provider === "mistral" ? (
+                    <select
+                      value={aiConfig.model}
+                      onChange={(e) => setAiConfig((p) => ({ ...p, model: e.target.value }))}
+                      className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2"
+                    >
+                      <option value="">Default (mistral-small)</option>
+                      <option value="mistral-small-latest">mistral-small</option>
+                      <option value="mistral-medium-latest">mistral-medium</option>
+                      <option value="mistral-large-latest">mistral-large</option>
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={aiConfig.model}
+                      onChange={(e) => setAiConfig((p) => ({ ...p, model: e.target.value }))}
+                      placeholder={aiConfig.provider === "ollama" ? "llama3" : "model name"}
+                      className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 font-mono"
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div className="mb-4">
+                <label className="text-xs text-gray-600 font-medium">
+                  API Key {aiConfig.hasApiKey && <span className="text-green-600 ml-1">✓ saved</span>}
+                </label>
+                <input
+                  type="password"
+                  value={aiConfig.apiKey}
+                  onChange={(e) => setAiConfig((p) => ({ ...p, apiKey: e.target.value }))}
+                  placeholder={aiConfig.hasApiKey ? "Leave blank to keep existing key" : "Paste your API key"}
+                  className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 font-mono"
+                />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  {aiConfig.provider === "openai" && <>Get your key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">platform.openai.com/api-keys</a></>}
+                  {aiConfig.provider === "anthropic" && <>Get your key at <a href="https://console.anthropic.com/settings/api-keys" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">console.anthropic.com</a></>}
+                  {aiConfig.provider === "mistral" && <>Get your key at <a href="https://console.mistral.ai/api-keys" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">console.mistral.ai</a></>}
+                  {(aiConfig.provider === "ollama" || aiConfig.provider === "custom") && "Not required for local / custom providers"}
+                  {!aiConfig.provider && "Your key is stored on the server and never exposed to the browser"}
+                </p>
+              </div>
+
+              {(aiConfig.provider === "ollama" || aiConfig.provider === "custom") && (
+                <div className="mb-4">
+                  <label className="text-xs text-gray-600 font-medium">Base URL</label>
+                  <input
+                    type="url"
+                    value={aiConfig.baseUrl}
+                    onChange={(e) => setAiConfig((p) => ({ ...p, baseUrl: e.target.value }))}
+                    placeholder={aiConfig.provider === "ollama" ? "http://localhost:11434" : "https://your-api.com/v1"}
+                    className="mt-1 w-full text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 font-mono"
+                  />
+                </div>
+              )}
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleSaveAi}
+                  disabled={aiSaving}
+                  className="text-sm bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-5 py-2 rounded-lg transition-colors font-medium"
+                >
+                  {aiSaving ? "Saving..." : "Save AI Settings"}
+                </button>
+                {aiSaved && <span className="text-sm text-green-600 font-medium">Saved!</span>}
+                {!aiConfig.enabled && aiConfig.provider && (
+                  <span className="text-xs text-amber-600">Provider configured but disabled — toggle to enable</span>
+                )}
+              </div>
+
+              {!aiConfig.provider && (
+                <p className="text-xs text-gray-400 mt-3 border-t border-gray-100 pt-3">
+                  Without an AI provider, the AI Coach will return a formatted prompt you can paste into any AI chat tool (ChatGPT, Claude, etc.)
+                </p>
+              )}
             </div>
           </>
         )}
