@@ -1,8 +1,7 @@
 import "./globals.css";
-import Sidebar from "../components/Sidebar";
 import Toaster from "../components/Toaster";
-import SetupGuard from "../components/SetupGuard";
 import { AppConfigProvider } from "../context/AppConfigContext";
+import LayoutShell from "../components/LayoutShell";
 
 export const metadata = {
   title: "AIgileCoach",
@@ -14,11 +13,7 @@ export default function RootLayout({ children }) {
     <html lang="en">
       <body className="bg-gray-50">
         <AppConfigProvider>
-          <Sidebar />
-          <div className="min-h-screen" id="main-content">
-            <SetupGuard />
-            {children}
-          </div>
+          <LayoutShell>{children}</LayoutShell>
           <Toaster />
         </AppConfigProvider>
       </body>

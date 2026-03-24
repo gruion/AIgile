@@ -1826,7 +1826,26 @@ app.post("/config/test-connection", async (req, res) => {
       return res.json({ ok: false, error: detail });
     }
     const user = await resp.json();
-    return res.json({ ok: true, displayName: user.displayName, emailAddress: user.emailAddress });
+
+    // Fetch projects list for the setup wizard
+    let projects = [];
+    try {
+      const projUrl = `${url.replace(/\/+$/, "")}/rest/api/2/project`;
+      const projResp = await fetch(projUrl, {
+        headers: {
+          Authorization: "Basic " + Buffer.from(`${username}:${token}`).toString("base64"),
+          Accept: "application/json",
+        },
+      });
+      if (projResp.ok) {
+        const projData = await projResp.json();
+        projects = projData.map((p) => ({ key: p.key, name: p.name }));
+      }
+    } catch {
+      // Non-fatal — projects list is optional
+    }
+
+    return res.json({ ok: true, displayName: user.displayName, emailAddress: user.emailAddress, projects });
   } catch (err) {
     return res.json({ ok: false, error: describeNetworkError(err, url) });
   }

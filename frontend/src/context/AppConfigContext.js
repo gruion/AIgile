@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useEffect } from "react";
+import { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { fetchConfigStatus } from "../lib/api";
 
 const AppConfigContext = createContext({
@@ -8,6 +8,7 @@ const AppConfigContext = createContext({
   jiraBaseUrl: "",
   needsSetup: true,
   ready: false,
+  refresh: async () => {},
 });
 
 export function AppConfigProvider({ children }) {
@@ -18,23 +19,24 @@ export function AppConfigProvider({ children }) {
     ready: false,
   });
 
-  useEffect(() => {
-    fetchConfigStatus()
-      .then((s) => {
-        setConfig({
-          defaultJql: s.defaultJql || "",
-          jiraBaseUrl: s.browserUrl || "",
-          needsSetup: !!s.needsSetup,
-          ready: true,
-        });
-      })
-      .catch(() => {
-        setConfig((prev) => ({ ...prev, ready: true }));
+  const refresh = useCallback(async () => {
+    try {
+      const s = await fetchConfigStatus();
+      setConfig({
+        defaultJql: s.defaultJql || "",
+        jiraBaseUrl: s.browserUrl || "",
+        needsSetup: !!s.needsSetup,
+        ready: true,
       });
+    } catch {}
   }, []);
 
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
   return (
-    <AppConfigContext.Provider value={config}>
+    <AppConfigContext.Provider value={{ ...config, refresh }}>
       {children}
     </AppConfigContext.Provider>
   );
