@@ -3662,18 +3662,24 @@ app.get("/dependencies", async (req, res) => {
         if (!target) continue;
 
         const targetProject = target.key.split("-")[0];
+        const isOutward = !!link.outwardIssue;
+        const fromKey = isOutward ? issue.key : target.key;
+        const toKey = isOutward ? target.key : issue.key;
         const edge = {
-          from: link.outwardIssue ? issue.key : target.key,
-          to: link.outwardIssue ? target.key : issue.key,
+          from: fromKey,
+          to: toKey,
           type: link.type?.name,
-          direction: link.outwardIssue ? link.type?.outward : link.type?.inward,
-          fromProject: link.outwardIssue ? project : targetProject,
-          toProject: link.outwardIssue ? targetProject : project,
+          direction: isOutward ? link.type?.outward : link.type?.inward,
+          fromProject: isOutward ? project : targetProject,
+          toProject: isOutward ? targetProject : project,
           isCrossProject: project !== targetProject,
-          targetStatus: target.fields?.status?.name,
-          targetStatusCategory: target.fields?.status?.statusCategory?.key,
-          targetSummary: target.fields?.summary,
-          targetPriority: target.fields?.priority?.name,
+          fromSummary: isOutward ? f.summary : target.fields?.summary,
+          fromStatus: isOutward ? f.status?.name : target.fields?.status?.name,
+          fromPriority: isOutward ? f.priority?.name : target.fields?.priority?.name,
+          toSummary: isOutward ? target.fields?.summary : f.summary,
+          toStatus: isOutward ? target.fields?.status?.name : f.status?.name,
+          toStatusCategory: isOutward ? target.fields?.status?.statusCategory?.key : f.status?.statusCategory?.key,
+          toPriority: isOutward ? target.fields?.priority?.name : f.priority?.name,
         };
 
         edges.push(edge);

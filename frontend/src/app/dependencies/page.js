@@ -521,17 +521,20 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   <ProjectBadge project={edge.fromProject} />
                   <div className="min-w-0">
-                    <JiraLink issueKey={edge.from} jiraBaseUrl={jiraBaseUrl} />
-                    {edge.targetSummary && (
-                      <p className="text-xs text-gray-500 truncate mt-0.5">{edge.targetSummary}</p>
+                    <div className="flex items-center gap-1.5">
+                      <JiraLink issueKey={edge.from} jiraBaseUrl={jiraBaseUrl} />
+                      {edge.fromStatus && <StatusBadge status={edge.fromStatus} />}
+                    </div>
+                    {edge.fromSummary && (
+                      <p className="text-xs text-gray-500 truncate mt-0.5">{edge.fromSummary}</p>
                     )}
                   </div>
                 </div>
 
-                {/* Arrow / Type */}
-                <div className="flex items-center gap-2 shrink-0">
-                  <LinkTypeBadge type={edge.type} />
-                  <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                {/* Arrow / Direction */}
+                <div className="flex flex-col items-center gap-0.5 shrink-0 px-2">
+                  <span className="text-[9px] text-gray-400 font-medium">{edge.direction || edge.type}</span>
+                  <svg className="w-5 h-5 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                   </svg>
                 </div>
@@ -540,9 +543,12 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   <ProjectBadge project={edge.toProject} />
                   <div className="min-w-0">
-                    <JiraLink issueKey={edge.to} jiraBaseUrl={jiraBaseUrl} />
-                    {edge.targetStatus && (
-                      <StatusBadge status={edge.targetStatus} />
+                    <div className="flex items-center gap-1.5">
+                      <JiraLink issueKey={edge.to} jiraBaseUrl={jiraBaseUrl} />
+                      {edge.toStatus && <StatusBadge status={edge.toStatus} />}
+                    </div>
+                    {edge.toSummary && (
+                      <p className="text-xs text-gray-500 truncate mt-0.5">{edge.toSummary}</p>
                     )}
                   </div>
                 </div>
