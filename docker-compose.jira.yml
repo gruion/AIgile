@@ -1,14 +1,16 @@
+## Standalone Jira instance — independent from AIgileCoach
+## Usage: docker compose -f docker-compose.jira.yml up -d
+
 services:
-  # ─── Jira Software (Data Center) ───────────────────────────
   jira:
     image: atlassian/jira-software:9.12-jdk17
     container_name: jira-dashboard-jira
     ports:
-      - "9080:8080"
+      - "${JIRA_PORT:-9080}:8080"
     environment:
       - ATL_JDBC_URL=jdbc:postgresql://jira-db:5432/jira
       - ATL_JDBC_USER=jira
-      - ATL_JDBC_PASSWORD=${JIRA_DB_PASSWORD}
+      - ATL_JDBC_PASSWORD=${JIRA_DB_PASSWORD:-jira_secret}
       - ATL_DB_DRIVER=org.postgresql.Driver
       - ATL_DB_TYPE=postgres72
       - JVM_MINIMUM_MEMORY=1024m
@@ -19,17 +21,17 @@ services:
       jira-db:
         condition: service_healthy
     networks:
-      - jira-net
+      - jira-internal
+      - shared-net
     restart: unless-stopped
 
-  # ─── PostgreSQL for Jira ───────────────────────────────────
   jira-db:
     image: postgres:15-alpine
     container_name: jira-dashboard-db
     environment:
       - POSTGRES_DB=jira
       - POSTGRES_USER=jira
-      - POSTGRES_PASSWORD=${JIRA_DB_PASSWORD}
+      - POSTGRES_PASSWORD=${JIRA_DB_PASSWORD:-jira_secret}
     volumes:
       - jira-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -38,7 +40,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - jira-net
+      - jira-internal
     restart: unless-stopped
 
 volumes:
@@ -46,5 +48,8 @@ volumes:
   jira-db-data:
 
 networks:
-  jira-net:
+  jira-internal:
     driver: bridge
+  shared-net:
+    name: aigilecoach-net
+    external: true

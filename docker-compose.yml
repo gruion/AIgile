@@ -16,7 +16,7 @@ services:
     volumes:
       - dashboard-config:/data
     networks:
-      - dashboard-net
+      - shared-net
     restart: unless-stopped
 
   # ─── Frontend (Next.js Dashboard) ─────────────────────────
@@ -32,12 +32,13 @@ services:
     depends_on:
       - api
     networks:
-      - dashboard-net
+      - shared-net
     restart: unless-stopped
 
 volumes:
   dashboard-config:
 
 networks:
-  dashboard-net:
+  shared-net:
+    name: aigilecoach-net
     driver: bridge
