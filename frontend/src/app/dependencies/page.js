@@ -235,12 +235,35 @@ function BlockingTreeNode({ node, depth = 0, jiraBaseUrl }) {
 function JiraLinksTab({ data, loading, jiraBaseUrl }) {
   const [crossProjectOnly, setCrossProjectOnly] = useState(true);
   const [treeView, setTreeView] = useState(true);
+  const [selectedPair, setSelectedPair] = useState(null); // null or [projA, projB]
 
   if (loading) return <Spinner text="Loading dependency data..." />;
   if (!data) return <div className="text-center py-12 text-gray-400 text-sm">No data loaded</div>;
 
   const { nodes, edges, crossProjectEdges, projectMatrix, stats, criticalBlockers, blockingTree } = data;
-  const displayedEdges = crossProjectOnly ? (crossProjectEdges || []) : (edges || []);
+
+  // Filter helpers when a project pair is selected
+  const pairProjects = selectedPair ? new Set(selectedPair) : null;
+
+  function isNodeInPair(key) {
+    if (!pairProjects) return true;
+    const node = (nodes || []).find((n) => n.key === key);
+    return node ? pairProjects.has(node.project) : false;
+  }
+
+  function filterTree(treeNodes) {
+    if (!pairProjects) return treeNodes;
+    return treeNodes
+      .filter((n) => pairProjects.has(n.project) || n.children?.some((c) => pairProjects.has(c.project)))
+      .map((n) => ({ ...n, children: filterTree(n.children || []) }))
+      .filter((n) => pairProjects.has(n.project) || n.children.length > 0);
+  }
+
+  const filteredBlockingTree = filterTree(blockingTree || []);
+  const filteredBlockers = (criticalBlockers || []).filter((b) => !pairProjects || pairProjects.has(b.project));
+  const filteredEdges = (crossProjectOnly ? crossProjectEdges : edges || [])
+    .filter((e) => !pairProjects || (pairProjects.has(e.fromProject) && pairProjects.has(e.toProject)));
+  const displayedEdges = filteredEdges;
 
   return (
     <div className="space-y-6">
@@ -255,35 +278,132 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
         </div>
       )}
 
+      {/* Active filter banner */}
+      {selectedPair && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+            </svg>
+            <span className="text-sm text-blue-800">
+              Filtered: <ProjectBadge project={selectedPair[0]} /> <span className="text-blue-400 mx-1">↔</span> <ProjectBadge project={selectedPair[1]} />
+            </span>
+          </div>
+          <button
+            onClick={() => setSelectedPair(null)}
+            className="text-xs text-blue-600 hover:text-blue-800 font-medium px-2 py-1 rounded hover:bg-blue-100 transition-colors"
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
+
+      {/* Blocking Dependency Tree */}
+      {(filteredBlockingTree.length > 0 || filteredBlockers.length > 0) && (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">Blocking Dependency Tree</h2>
+              <p className="text-[10px] text-gray-500 mt-0.5">
+                Resolve top-level blockers first — they unblock the most tickets downstream
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setTreeView(true)}
+                className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
+                  treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                Tree View
+              </button>
+              <button
+                onClick={() => setTreeView(false)}
+                className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
+                  !treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                Flat List
+              </button>
+            </div>
+          </div>
+
+          <div className="p-4">
+            {treeView && filteredBlockingTree.length > 0 ? (
+              <div className="space-y-3">
+                {filteredBlockingTree.map((root) => (
+                  <BlockingTreeNode key={root.key} node={root} depth={0} jiraBaseUrl={jiraBaseUrl} />
+                ))}
+              </div>
+            ) : treeView && filteredBlockingTree.length === 0 ? (
+              <div className="text-center py-6 text-gray-400 text-sm">
+                No blocking chains found — no tickets block other tickets.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filteredBlockers.map((blocker, i) => (
+                  <div key={i} className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-gray-50">
+                    <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-red-100 text-red-700 font-bold text-xs shrink-0">
+                      {blocker.blocksCount}
+                    </span>
+                    <ProjectBadge project={blocker.project} />
+                    <JiraLink issueKey={blocker.key} jiraBaseUrl={jiraBaseUrl} />
+                    <StatusBadge status={blocker.status} />
+                    <span className="text-xs text-gray-600 truncate flex-1 min-w-0">{blocker.summary}</span>
+                    {blocker.isCrossProject && (
+                      <span className="text-[9px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full shrink-0">cross-project</span>
+                    )}
+                    <span className="text-[10px] text-red-600 font-medium shrink-0">
+                      blocks {blocker.blocksCount}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Project Matrix */}
       {projectMatrix && projectMatrix.length > 0 && (
         <div>
           <h2 className="text-lg font-semibold text-gray-900 mb-3">Project Matrix</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {projectMatrix.map((pm, i) => (
-              <div
-                key={i}
-                className={`bg-white rounded-lg p-4 border-2 ${
-                  pm.blocking > 0 ? "border-red-400" : "border-gray-200"
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-2">
-                  {pm.projects.map((p) => (
-                    <ProjectBadge key={p} project={p} />
-                  ))}
-                </div>
-                <div className="flex items-center gap-4 text-sm">
-                  <span className="text-gray-600">
-                    <span className="font-semibold text-gray-900">{pm.count}</span> links
-                  </span>
-                  {pm.blocking > 0 && (
-                    <span className="text-red-600 font-medium">
-                      {pm.blocking} blocking
+            {projectMatrix.map((pm, i) => {
+              const isSelected = selectedPair && pm.projects[0] === selectedPair[0] && pm.projects[1] === selectedPair[1];
+              return (
+                <div
+                  key={i}
+                  onClick={() => setSelectedPair(isSelected ? null : [...pm.projects])}
+                  className={`bg-white rounded-lg p-4 border-2 cursor-pointer transition-all hover:shadow-md ${
+                    isSelected
+                      ? "border-blue-500 ring-2 ring-blue-200 shadow-sm"
+                      : pm.blocking > 0
+                        ? "border-red-400 hover:border-red-500"
+                        : "border-gray-200 hover:border-gray-300"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    {pm.projects.map((p) => (
+                      <ProjectBadge key={p} project={p} />
+                    ))}
+                    {isSelected && (
+                      <span className="text-[9px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded-full ml-auto">filtered</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-4 text-sm">
+                    <span className="text-gray-600">
+                      <span className="font-semibold text-gray-900">{pm.count}</span> links
                     </span>
-                  )}
+                    {pm.blocking > 0 && (
+                      <span className="text-red-600 font-medium">
+                        {pm.blocking} blocking
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -349,72 +469,6 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
         )}
       </div>
 
-      {/* Blocking Dependency Tree */}
-      {(blockingTree?.length > 0 || criticalBlockers?.length > 0) && (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold text-gray-900">Blocking Dependency Tree</h2>
-              <p className="text-[10px] text-gray-500 mt-0.5">
-                Resolve top-level blockers first — they unblock the most tickets downstream
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setTreeView(true)}
-                className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
-                  treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
-                }`}
-              >
-                Tree View
-              </button>
-              <button
-                onClick={() => setTreeView(false)}
-                className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
-                  !treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
-                }`}
-              >
-                Flat List
-              </button>
-            </div>
-          </div>
-
-          <div className="p-4">
-            {treeView && blockingTree?.length > 0 ? (
-              <div className="space-y-3">
-                {blockingTree.map((root) => (
-                  <BlockingTreeNode key={root.key} node={root} depth={0} jiraBaseUrl={jiraBaseUrl} />
-                ))}
-              </div>
-            ) : treeView && (!blockingTree || blockingTree.length === 0) ? (
-              <div className="text-center py-6 text-gray-400 text-sm">
-                No blocking chains found — no tickets block other tickets.
-              </div>
-            ) : (
-              /* Flat list fallback */
-              <div className="space-y-2">
-                {(criticalBlockers || []).map((blocker, i) => (
-                  <div key={i} className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-gray-50">
-                    <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-red-100 text-red-700 font-bold text-xs shrink-0">
-                      {blocker.blocksCount}
-                    </span>
-                    <ProjectBadge project={blocker.project} />
-                    <JiraLink issueKey={blocker.key} jiraBaseUrl={jiraBaseUrl} />
-                    <StatusBadge status={blocker.status} />
-                    <span className="text-xs text-gray-600 truncate flex-1 min-w-0">{blocker.summary}</span>
-                    {blocker.isCrossProject && (
-                      <span className="text-[9px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full shrink-0">cross-project</span>
-                    )}
-                    <span className="text-[10px] text-red-600 font-medium shrink-0">
-                      blocks {blocker.blocksCount}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
