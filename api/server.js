@@ -3702,15 +3702,29 @@ app.get("/dependencies", async (req, res) => {
     );
     const blockedByExternal = blockingEdges.filter(e => e.isCrossProject);
 
-    // Project-to-project matrix
+    // Project-to-project matrix (deduplicated: A->B and B->A count as one link)
     const projectMatrix = {};
     for (const edge of crossProjectEdges) {
       const pairKey = [edge.fromProject, edge.toProject].sort().join(" <-> ");
-      if (!projectMatrix[pairKey]) projectMatrix[pairKey] = { pair: pairKey, projects: [edge.fromProject, edge.toProject].sort(), count: 0, blocking: 0, edges: [] };
-      projectMatrix[pairKey].count++;
-      if (edge.direction?.toLowerCase().includes("block")) projectMatrix[pairKey].blocking++;
+      if (!projectMatrix[pairKey]) {
+        projectMatrix[pairKey] = { pair: pairKey, projects: [edge.fromProject, edge.toProject].sort(), count: 0, blocking: 0, edges: [], seenLinks: new Set(), seenBlocking: new Set() };
+      }
+      // Deduplicate: "A blocks B" and "B is blocked by A" are the same relationship
+      const linkKey = [edge.from, edge.to].sort().join(":");
+      if (!projectMatrix[pairKey].seenLinks.has(linkKey)) {
+        projectMatrix[pairKey].seenLinks.add(linkKey);
+        projectMatrix[pairKey].count++;
+      }
+      if (edge.direction?.toLowerCase().includes("block")) {
+        if (!projectMatrix[pairKey].seenBlocking.has(linkKey)) {
+          projectMatrix[pairKey].seenBlocking.add(linkKey);
+          projectMatrix[pairKey].blocking++;
+        }
+      }
       projectMatrix[pairKey].edges.push(edge);
     }
+    // Clean up internal tracking sets before sending response
+    for (const pm of Object.values(projectMatrix)) { delete pm.seenLinks; delete pm.seenBlocking; }
 
     // Critical path: issues that block the most other issues (deduplicated)
     // Only count unique blocked tickets per blocker (avoid duplicates from bidirectional links)

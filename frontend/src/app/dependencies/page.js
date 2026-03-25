@@ -260,40 +260,58 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
     return base.filter((e) => pairSet.has(e.fromProject) && pairSet.has(e.toProject));
   }, [crossProjectOnly, crossProjectEdges, edges, selectedPair]);
 
-  // When a pair is selected, build a mini blocking tree from the pair's blocking edges
-  // This catches blockers that are mid-chain (not global roots)
-  const filteredBlockingTree = useMemo(() => {
-    if (!pairTicketKeys) return blockingTree || [];
+  // Node lookup
+  const nodeMap = useMemo(() => {
+    const map = {};
+    for (const n of (nodes || [])) map[n.key] = n;
+    return map;
+  }, [nodes]);
 
-    // Get blocking edges between the pair's projects
+  // Build blocking tree + flat list from pair's edges (or global when no filter)
+  const { filteredBlockingTree, filteredBlockers } = useMemo(() => {
+    if (!selectedPair) {
+      return { filteredBlockingTree: blockingTree || [], filteredBlockers: criticalBlockers || [] };
+    }
+
     const pairSet = new Set(selectedPair);
+
+    // Get ALL blocking edges between the pair
     const pairBlockingEdges = (edges || []).filter((e) =>
       pairSet.has(e.fromProject) && pairSet.has(e.toProject) &&
       (e.direction?.toLowerCase().includes("block") || e.type?.toLowerCase().includes("block"))
     );
 
-    if (pairBlockingEdges.length === 0) return [];
-
-    // Build adjacency: who blocks whom within this pair
-    const blockSets = {};
-    for (const e of pairBlockingEdges) {
-      if (!blockSets[e.from]) blockSets[e.from] = new Set();
-      blockSets[e.from].add(e.to);
+    if (pairBlockingEdges.length === 0) {
+      return { filteredBlockingTree: [], filteredBlockers: [] };
     }
 
-    // Find roots: blockers that are NOT blocked by anyone within this pair
+    // Deduplicate: normalize direction so "A is blocked by B" becomes "B blocks A"
+    const blockSets = {}; // blocker -> Set of blocked keys
+    const seenPairs = new Set();
+    for (const e of pairBlockingEdges) {
+      const dir = (e.direction || "").toLowerCase();
+      let blocker, blocked;
+      if (dir.includes("is blocked by")) {
+        blocker = e.to;   // the other ticket is the blocker
+        blocked = e.from;
+      } else {
+        blocker = e.from;
+        blocked = e.to;
+      }
+      const dedupKey = blocker + ":" + blocked;
+      if (seenPairs.has(dedupKey)) continue;
+      seenPairs.add(dedupKey);
+      if (!blockSets[blocker]) blockSets[blocker] = new Set();
+      blockSets[blocker].add(blocked);
+    }
+
+    // Find local roots: blockers not blocked by anyone within this pair
     const allBlocked = new Set();
-    for (const e of pairBlockingEdges) allBlocked.add(e.to);
-    const roots = Object.keys(blockSets).filter((k) => !allBlocked.has(k));
+    for (const s of Object.values(blockSets)) for (const k of s) allBlocked.add(k);
+    const rootKeys = Object.keys(blockSets).filter((k) => !allBlocked.has(k));
+    const finalRoots = rootKeys.length > 0 ? rootKeys : Object.keys(blockSets);
 
-    // If no pure roots (cycle), use all blockers as roots
-    const rootKeys = roots.length > 0 ? roots : Object.keys(blockSets);
-
-    // Build node lookup from the flat nodes array
-    const nodeMap = {};
-    for (const n of (nodes || [])) nodeMap[n.key] = n;
-
-    // Recursive tree builder
+    // Build tree — include blocked tickets as leaf nodes even if they don't block anything
     function buildTree(key, visited = new Set()) {
       if (visited.has(key)) return null;
       visited.add(key);
@@ -309,18 +327,22 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
       };
     }
 
-    return rootKeys
+    const tree = finalRoots
       .map((k) => buildTree(k))
       .filter(Boolean)
       .sort((a, b) => b.blocksCount - a.blocksCount);
-  }, [blockingTree, pairTicketKeys, edges, nodes, selectedPair]);
 
-  const filteredBlockers = useMemo(() => {
-    if (!pairTicketKeys) return criticalBlockers || [];
-    return (criticalBlockers || []).filter((b) =>
-      pairTicketKeys.has(b.key) || (b.blockedKeys || []).some((k) => pairTicketKeys.has(k))
-    );
-  }, [criticalBlockers, pairTicketKeys]);
+    // Flat blocker list: every unique blocker from this pair's edges
+    const flatBlockers = Object.entries(blockSets)
+      .map(([key, blockedSet]) => ({
+        ...(nodeMap[key] || { key, project: "?", summary: key }),
+        blocksCount: blockedSet.size,
+        blockedKeys: [...blockedSet],
+      }))
+      .sort((a, b) => b.blocksCount - a.blocksCount);
+
+    return { filteredBlockingTree: tree, filteredBlockers: flatBlockers };
+  }, [selectedPair, blockingTree, criticalBlockers, edges, nodeMap]);
 
   // Early returns AFTER all hooks
   if (loading) return <Spinner text="Loading dependency data..." />;
