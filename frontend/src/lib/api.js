@@ -404,6 +404,42 @@ export async function askAiCoach(context, question, data) {
   return res.json();
 }
 
+// ─── RACI Matrix ─────────────────────────────────────────
+
+export async function fetchRaciMatrices() {
+  const res = await apiFetch(`${API_URL}/raci`);
+  if (!res.ok) await throwApiError(res, "Failed to fetch RACI matrices");
+  return res.json();
+}
+
+export async function saveRaciMatrix(matrix) {
+  const res = await apiFetch(`${API_URL}/raci`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(matrix),
+  });
+  if (!res.ok) await throwApiError(res, "Failed to save RACI matrix");
+  return res.json();
+}
+
+export async function deleteRaciMatrix(id) {
+  const res = await apiFetch(`${API_URL}/raci/${id}`, { method: "DELETE" });
+  if (!res.ok) await throwApiError(res, "Failed to delete RACI matrix");
+  return res.json();
+}
+
+export async function validateRaciMatrix(id) {
+  const res = await apiFetch(`${API_URL}/raci/${id}/validate`, { method: "POST" });
+  if (!res.ok) await throwApiError(res, "Failed to validate RACI matrix");
+  return res.json();
+}
+
+export async function suggestRaci() {
+  const res = await apiFetch(`${API_URL}/raci/suggest`);
+  if (!res.ok) await throwApiError(res, "Failed to get RACI suggestions");
+  return res.json();
+}
+
 // ─── Dependencies ────────────────────────────────────────
 
 export async function fetchDependencies(jql) {

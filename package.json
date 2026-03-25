@@ -12,9 +12,13 @@
     "build": "cd frontend && npm run build",
     "start": "npx concurrently -k --raw \"npm run start:api\" \"npm run start:frontend\"",
     "start:api": "cd api && node server.js",
-    "start:frontend": "cd frontend && npx next start -p 3010"
+    "start:frontend": "cd frontend && npx next start -p 3010",
+    "test": "npx playwright test",
+    "test:ui": "npx playwright test --ui",
+    "test:headed": "npx playwright test --headed"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "concurrently": "^9.1.2",
     "dotenv-cli": "^8.0.0"
   }

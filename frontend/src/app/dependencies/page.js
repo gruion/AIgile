@@ -141,15 +141,105 @@ function Spinner({ text }) {
   );
 }
 
+// ─── Blocking Tree Node ───────────────────────────────────────────────────────
+
+function BlockingTreeNode({ node, depth = 0, jiraBaseUrl }) {
+  const [expanded, setExpanded] = useState(depth < 2); // auto-expand first 2 levels
+  const hasChildren = node.children && node.children.length > 0;
+  const isRoot = depth === 0;
+
+  const statusColor =
+    node.statusCategory === "done" ? "bg-green-100 text-green-700" :
+    node.statusCategory === "indeterminate" ? "bg-blue-100 text-blue-700" :
+    "bg-gray-100 text-gray-600";
+
+  const priorityColor =
+    node.priority === "Highest" || node.priority === "Blocker" ? "text-red-600" :
+    node.priority === "High" ? "text-orange-600" :
+    "text-gray-500";
+
+  return (
+    <div className={isRoot ? "" : "ml-6 border-l-2 border-red-200"}>
+      <div className={`flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-gray-50 transition-colors ${
+        isRoot ? "bg-red-50 border border-red-200 rounded-lg px-3 py-2" : ""
+      }`}>
+        {/* Expand/collapse toggle */}
+        {hasChildren ? (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="w-5 h-5 flex items-center justify-center text-gray-400 hover:text-gray-600 shrink-0"
+          >
+            <svg className={`w-3.5 h-3.5 transition-transform ${expanded ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+        ) : (
+          <span className="w-5 h-5 flex items-center justify-center shrink-0">
+            <span className={`w-2 h-2 rounded-full ${node.statusCategory === "done" ? "bg-green-400" : "bg-red-400"}`} />
+          </span>
+        )}
+
+        {/* Connector line for non-root */}
+        {!isRoot && (
+          <span className="text-red-300 text-xs font-mono shrink-0">{"──"}</span>
+        )}
+
+        {/* Project badge */}
+        <ProjectBadge project={node.project} />
+
+        {/* Ticket key */}
+        <JiraLink issueKey={node.key} jiraBaseUrl={jiraBaseUrl} />
+
+        {/* Status */}
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${statusColor}`}>
+          {node.status}
+        </span>
+
+        {/* Priority */}
+        {node.priority && (
+          <span className={`text-[10px] font-medium ${priorityColor}`}>
+            {node.priority}
+          </span>
+        )}
+
+        {/* Summary */}
+        <span className="text-xs text-gray-600 truncate flex-1 min-w-0">{node.summary}</span>
+
+        {/* Assignee */}
+        {node.assignee && (
+          <span className="text-[10px] text-gray-400 shrink-0">{node.assignee}</span>
+        )}
+
+        {/* Block count badge */}
+        {hasChildren && (
+          <span className="text-[10px] font-bold bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full shrink-0">
+            blocks {node.blocksCount}
+          </span>
+        )}
+      </div>
+
+      {/* Children */}
+      {expanded && hasChildren && (
+        <div className="mt-0.5">
+          {node.children.map((child) => (
+            <BlockingTreeNode key={child.key} node={child} depth={depth + 1} jiraBaseUrl={jiraBaseUrl} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Jira Links Tab ───────────────────────────────────────────────────────────
 
 function JiraLinksTab({ data, loading, jiraBaseUrl }) {
   const [crossProjectOnly, setCrossProjectOnly] = useState(true);
+  const [treeView, setTreeView] = useState(true);
 
   if (loading) return <Spinner text="Loading dependency data..." />;
   if (!data) return <div className="text-center py-12 text-gray-400 text-sm">No data loaded</div>;
 
-  const { nodes, edges, crossProjectEdges, projectMatrix, stats, criticalBlockers } = data;
+  const { nodes, edges, crossProjectEdges, projectMatrix, stats, criticalBlockers, blockingTree } = data;
   const displayedEdges = crossProjectOnly ? (crossProjectEdges || []) : (edges || []);
 
   return (
@@ -259,34 +349,69 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
         )}
       </div>
 
-      {/* Critical Blockers */}
-      {criticalBlockers && criticalBlockers.length > 0 && (
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">Critical Blockers</h2>
-          <div className="space-y-2">
-            {criticalBlockers.map((blocker, i) => (
-              <div
-                key={i}
-                className="bg-white rounded-lg border border-red-200 p-3 flex items-center gap-3"
+      {/* Blocking Dependency Tree */}
+      {(blockingTree?.length > 0 || criticalBlockers?.length > 0) && (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">Blocking Dependency Tree</h2>
+              <p className="text-[10px] text-gray-500 mt-0.5">
+                Resolve top-level blockers first — they unblock the most tickets downstream
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setTreeView(true)}
+                className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
+                  treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                }`}
               >
-                <div className="shrink-0">
-                  <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-red-100 text-red-700 font-bold text-sm">
-                    {blocker.blocksCount}
-                  </span>
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
+                Tree View
+              </button>
+              <button
+                onClick={() => setTreeView(false)}
+                className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
+                  !treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                Flat List
+              </button>
+            </div>
+          </div>
+
+          <div className="p-4">
+            {treeView && blockingTree?.length > 0 ? (
+              <div className="space-y-3">
+                {blockingTree.map((root) => (
+                  <BlockingTreeNode key={root.key} node={root} depth={0} jiraBaseUrl={jiraBaseUrl} />
+                ))}
+              </div>
+            ) : treeView && (!blockingTree || blockingTree.length === 0) ? (
+              <div className="text-center py-6 text-gray-400 text-sm">
+                No blocking chains found — no tickets block other tickets.
+              </div>
+            ) : (
+              /* Flat list fallback */
+              <div className="space-y-2">
+                {(criticalBlockers || []).map((blocker, i) => (
+                  <div key={i} className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-gray-50">
+                    <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-red-100 text-red-700 font-bold text-xs shrink-0">
+                      {blocker.blocksCount}
+                    </span>
                     <ProjectBadge project={blocker.project} />
                     <JiraLink issueKey={blocker.key} jiraBaseUrl={jiraBaseUrl} />
                     <StatusBadge status={blocker.status} />
+                    <span className="text-xs text-gray-600 truncate flex-1 min-w-0">{blocker.summary}</span>
+                    {blocker.isCrossProject && (
+                      <span className="text-[9px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full shrink-0">cross-project</span>
+                    )}
+                    <span className="text-[10px] text-red-600 font-medium shrink-0">
+                      blocks {blocker.blocksCount}
+                    </span>
                   </div>
-                  <p className="text-xs text-gray-600 mt-1 truncate">{blocker.summary}</p>
-                </div>
-                <span className="text-xs text-red-600 font-medium shrink-0">
-                  blocks {blocker.blocksCount} issue{blocker.blocksCount !== 1 ? "s" : ""}
-                </span>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         </div>
       )}

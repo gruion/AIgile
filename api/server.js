@@ -58,6 +58,7 @@ let JIRA_SERVERS = [];
 let TEAMS = [];
 let DEFAULT_TEAM_ID = "";
 let JQL_BOOKMARKS = []; // [{ id, name, jql }]
+let raciMatrices = {}; // RACI matrix store (in-memory)
 
 if (fileConfig) {
   // Tier 1: persisted config file
@@ -2523,6 +2524,33 @@ app.get("/compliance/projects", async (req, res) => {
         action: null,
       });
 
+      // RACI Documentation check (10 pts)
+      const projectRacis = Object.values(raciMatrices).filter((m) => m.type === "project");
+      let raciScore = 0;
+      let raciDetail = "No RACI matrix documented for this team.";
+      if (projectRacis.length > 0) {
+        raciScore += 3; // Has at least one matrix
+        const latest = projectRacis.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+        const acts = latest.activities || [];
+        const roles = latest.roles || [];
+        const allHaveA = acts.every((act) => roles.some((r) => latest.assignments[`${act.id}:${r.id}`] === "A"));
+        const allHaveR = acts.every((act) => roles.some((r) => latest.assignments[`${act.id}:${r.id}`] === "R"));
+        const fillCount = Object.values(latest.assignments || {}).filter(Boolean).length;
+        const totalCells = acts.length * roles.length;
+        const fillPct = totalCells > 0 ? Math.round((fillCount / totalCells) * 100) : 0;
+        if (allHaveA) raciScore += 3;
+        if (allHaveR) raciScore += 2;
+        if (fillPct >= 50) raciScore += 2;
+        raciDetail = `${projectRacis.length} matrix, ${acts.length} activities, ${roles.length} roles, ${fillPct}% filled.${!allHaveA ? " Missing Accountable on some activities." : ""}${!allHaveR ? " Missing Responsible on some activities." : ""}`;
+      }
+      checks.push({
+        id: "raci-documentation", name: "RACI Documentation", score: raciScore, maxScore: 10,
+        status: raciScore >= 8 ? "pass" : raciScore >= 4 ? "warning" : "fail",
+        description: "Teams should document who is Responsible, Accountable, Consulted, and Informed for key activities. A clear RACI matrix prevents ownership gaps, reduces confusion, and speeds up decision-making.",
+        detail: raciDetail,
+        action: raciScore < 8 ? { label: "Create RACI", keys: [], serverUrl: getBrowserUrl(server) } : null,
+      });
+
       const totalScore = checks.reduce((s, c) => s + c.score, 0);
       const maxPossible = checks.reduce((s, c) => s + c.maxScore, 0);
       const overallPct = Math.round((totalScore / maxPossible) * 100);
@@ -3402,6 +3430,160 @@ async function callAiProvider(prompt) {
   throw new Error("no_provider");
 }
 
+// ─── RACI Matrix ────────────────────────────────────────
+
+const DEFAULT_ACTIVITIES = [
+  "Sprint Planning", "Backlog Refinement", "Code Review", "Architecture Decisions",
+  "Release Sign-off", "Incident Response", "Deployment", "Sprint Review / Demo",
+  "Retrospective Facilitation", "Stakeholder Communication",
+];
+
+const DEFAULT_ROLES = ["Product Owner", "Scrum Master", "Tech Lead", "Developer", "QA", "Stakeholder"];
+
+app.get("/raci", (req, res) => {
+  const list = Object.values(raciMatrices).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  res.json(list);
+});
+
+app.post("/raci", (req, res) => {
+  const { id, template } = req.body;
+
+  // Create from template
+  if (template === "agile-default" && !id) {
+    const now = Date.now();
+    const matrix = {
+      id: `raci-${now}`,
+      name: "Project RACI",
+      type: "project",
+      activities: DEFAULT_ACTIVITIES.map((name, i) => ({ id: `act-${now}-${i}`, name, order: i })),
+      roles: DEFAULT_ROLES.map((name, i) => ({ id: `role-${now}-${i}`, name, order: i })),
+      assignments: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    raciMatrices[matrix.id] = matrix;
+    return res.json(matrix);
+  }
+
+  // Upsert existing
+  const matrixId = id || `raci-${Date.now()}`;
+  const existing = raciMatrices[matrixId];
+  raciMatrices[matrixId] = {
+    ...req.body,
+    id: matrixId,
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  res.json(raciMatrices[matrixId]);
+});
+
+app.delete("/raci/:id", (req, res) => {
+  delete raciMatrices[req.params.id];
+  res.json({ ok: true });
+});
+
+app.post("/raci/:id/validate", (req, res) => {
+  const matrix = raciMatrices[req.params.id];
+  if (!matrix) return res.status(404).json({ error: "Matrix not found" });
+
+  const errors = [];
+  const warnings = [];
+
+  for (const act of matrix.activities) {
+    const row = matrix.roles.map((r) => matrix.assignments[`${act.id}:${r.id}`]).filter(Boolean);
+    const aCount = row.filter((v) => v === "A").length;
+    const rCount = row.filter((v) => v === "R").length;
+
+    if (aCount === 0) errors.push({ activity: act.name, message: "No one is Accountable (A)" });
+    if (aCount > 1) errors.push({ activity: act.name, message: `${aCount} people are Accountable — must be exactly 1` });
+    if (rCount === 0) warnings.push({ activity: act.name, message: "No one is Responsible (R)" });
+    if (row.length === 0) warnings.push({ activity: act.name, message: "No assignments at all" });
+  }
+
+  // Check overloaded roles
+  for (const role of matrix.roles) {
+    const aCount = matrix.activities.filter((act) => matrix.assignments[`${act.id}:${role.id}`] === "A").length;
+    if (aCount > 5) warnings.push({ role: role.name, message: `Accountable for ${aCount} activities (may be overloaded)` });
+  }
+
+  res.json({ valid: errors.length === 0, errors, warnings, score: Math.max(0, 100 - errors.length * 15 - warnings.length * 5) });
+});
+
+app.get("/raci/suggest", async (req, res) => {
+  try {
+    const server = resolveServerFromReq(req);
+    if (!server) return res.status(400).json({ error: "No Jira server configured" });
+
+    const jql = req.query.jql || `project = ${TEAMS[0]?.projectKey || "TEAM"} ORDER BY updated DESC`;
+    const data = await jiraSearchAll(jql, "assignee,reporter,issuetype,status,comment", 200, "", server?.id);
+    const issues = data.issues;
+
+    // Analyze patterns
+    const assigneeCounts = {};
+    const reporterCounts = {};
+    const commenterCounts = {};
+
+    for (const issue of issues) {
+      const assignee = issue.fields.assignee?.displayName || "Unassigned";
+      const reporter = issue.fields.reporter?.displayName || "Unknown";
+      assigneeCounts[assignee] = (assigneeCounts[assignee] || 0) + 1;
+      reporterCounts[reporter] = (reporterCounts[reporter] || 0) + 1;
+
+      const comments = issue.fields.comment?.comments || [];
+      for (const c of comments.slice(-5)) {
+        const name = c.author?.displayName || "Unknown";
+        commenterCounts[name] = (commenterCounts[name] || 0) + 1;
+      }
+    }
+
+    // Build suggested roles from top contributors
+    const topAssignees = Object.entries(assigneeCounts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    const topReporters = Object.entries(reporterCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const allPeople = [...new Set([...topAssignees.map(([n]) => n), ...topReporters.map(([n]) => n)])].slice(0, 8);
+
+    const now = Date.now();
+    const suggestedMatrix = {
+      id: `raci-${now}`,
+      name: "Suggested RACI (from Jira activity)",
+      type: "project",
+      activities: DEFAULT_ACTIVITIES.map((name, i) => ({ id: `act-${now}-${i}`, name, order: i })),
+      roles: allPeople.map((name, i) => ({ id: `role-${now}-${i}`, name, order: i })),
+      assignments: {},
+      insights: {
+        totalIssues: issues.length,
+        topAssignees: topAssignees.map(([name, count]) => ({ name, count })),
+        topReporters: topReporters.map(([name, count]) => ({ name, count })),
+      },
+    };
+
+    // Auto-assign: top reporter = A for most activities, top assignees = R
+    if (topReporters.length > 0) {
+      const aRole = suggestedMatrix.roles.find((r) => r.name === topReporters[0][0]);
+      if (aRole) {
+        for (const act of suggestedMatrix.activities) {
+          suggestedMatrix.assignments[`${act.id}:${aRole.id}`] = "A";
+        }
+      }
+    }
+    if (topAssignees.length > 0) {
+      const rRole = suggestedMatrix.roles.find((r) => r.name === topAssignees[0][0]);
+      if (rRole) {
+        for (const act of suggestedMatrix.activities) {
+          if (!suggestedMatrix.assignments[`${act.id}:${rRole.id}`]) {
+            suggestedMatrix.assignments[`${act.id}:${rRole.id}`] = "R";
+          }
+        }
+      }
+    }
+
+    res.json(suggestedMatrix);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── AI Coach Endpoint ───────────────────────────────────
+
 app.post("/ai/coach", async (req, res) => {
   try {
     const { context, question, data } = req.body;
@@ -3530,15 +3712,59 @@ app.get("/dependencies", async (req, res) => {
       projectMatrix[pairKey].edges.push(edge);
     }
 
-    // Critical path: issues that block the most other issues
-    const blockCount = {};
+    // Critical path: issues that block the most other issues (deduplicated)
+    // Only count unique blocked tickets per blocker (avoid duplicates from bidirectional links)
+    const blockSets = {}; // key -> Set of blocked keys
     for (const edge of blockingEdges) {
-      blockCount[edge.from] = (blockCount[edge.from] || 0) + 1;
+      if (!blockSets[edge.from]) blockSets[edge.from] = new Set();
+      blockSets[edge.from].add(edge.to);
     }
-    const criticalBlockers = Object.entries(blockCount)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10)
-      .map(([key, count]) => ({ ...nodes[key], blocksCount: count }));
+    const criticalBlockers = Object.entries(blockSets)
+      .map(([key, blockedSet]) => ({
+        ...nodes[key],
+        blocksCount: blockedSet.size,
+        blockedKeys: [...blockedSet],
+        isCrossProject: [...blockedSet].some(bk => nodes[bk]?.project !== nodes[key]?.project),
+      }))
+      .sort((a, b) => b.blocksCount - a.blocksCount)
+      .slice(0, 15);
+
+    // Build blocking tree: for each root blocker, walk the chain
+    // A "root" is a blocker that is NOT blocked by anyone else
+    const blockedBySet = new Set();
+    for (const edge of blockingEdges) blockedBySet.add(edge.to);
+    const rootBlockers = criticalBlockers.filter(b => !blockedBySet.has(b.key));
+
+    function buildBlockingTree(key, visited = new Set()) {
+      if (visited.has(key)) return null; // cycle protection
+      visited.add(key);
+      const node = nodes[key];
+      if (!node) return null;
+      const children = (blockSets[key] || new Set());
+      return {
+        key: node.key,
+        summary: node.summary,
+        status: node.status,
+        statusCategory: node.statusCategory,
+        priority: node.priority,
+        assignee: node.assignee,
+        project: node.project,
+        blocksCount: children.size,
+        children: [...children]
+          .map(childKey => buildBlockingTree(childKey, new Set(visited)))
+          .filter(Boolean)
+          .sort((a, b) => b.blocksCount - a.blocksCount),
+      };
+    }
+
+    const blockingTree = rootBlockers
+      .map(b => buildBlockingTree(b.key))
+      .filter(Boolean)
+      .sort((a, b) => {
+        // Sort by total descendants (deep count)
+        const countDesc = (n) => n.children.reduce((s, c) => s + 1 + countDesc(c), 0);
+        return countDesc(b) - countDesc(a);
+      });
 
     res.json({
       projects: allProjects,
@@ -3554,6 +3780,7 @@ app.get("/dependencies", async (req, res) => {
         crossProjectBlockingCount: blockedByExternal.length,
       },
       criticalBlockers,
+      blockingTree,
     });
   } catch (err) {
     console.error("Error fetching dependencies:", err.message);
