@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { fetchDependencies, discoverDependencies, fetchConfig } from "../../lib/api";
 import AiCoachPanel from "../../components/AiCoachPanel";
 import JqlBar from "../../components/JqlBar";
@@ -242,39 +242,63 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
 
   const { nodes, edges, crossProjectEdges, projectMatrix, stats, criticalBlockers, blockingTree } = data;
 
-  // Filter helpers when a project pair is selected
-  const pairProjects = selectedPair ? new Set(selectedPair) : null;
+  // Filter by selected project pair
+  const pairSet = selectedPair ? new Set(selectedPair) : null;
 
-  function isNodeInPair(key) {
-    if (!pairProjects) return true;
-    const node = (nodes || []).find((n) => n.key === key);
-    return node ? pairProjects.has(node.project) : false;
+  // Build set of all ticket keys involved in edges between the selected pair
+  const pairTicketKeys = useMemo(() => {
+    if (!pairSet) return null;
+    const keys = new Set();
+    for (const e of (edges || [])) {
+      if (pairSet.has(e.fromProject) && pairSet.has(e.toProject)) {
+        keys.add(e.from);
+        keys.add(e.to);
+      }
+    }
+    return keys;
+  }, [selectedPair, edges]);
+
+  // Filter edges: show edges where both endpoints are in the pair's projects
+  const displayedEdges = useMemo(() => {
+    const base = crossProjectOnly ? (crossProjectEdges || []) : (edges || []);
+    if (!pairSet) return base;
+    return base.filter((e) => pairSet.has(e.fromProject) && pairSet.has(e.toProject));
+  }, [crossProjectOnly, crossProjectEdges, edges, selectedPair]);
+
+  // Filter tree: keep any branch that contains a ticket involved with the pair
+  function treeHasPairTicket(node) {
+    if (!pairTicketKeys) return true;
+    if (pairTicketKeys.has(node.key)) return true;
+    return (node.children || []).some((c) => treeHasPairTicket(c));
   }
 
-  function filterTree(treeNodes) {
-    if (!pairProjects) return treeNodes;
+  function pruneTree(treeNodes) {
+    if (!pairTicketKeys) return treeNodes;
     return treeNodes
-      .filter((n) => pairProjects.has(n.project) || n.children?.some((c) => pairProjects.has(c.project)))
-      .map((n) => ({ ...n, children: filterTree(n.children || []) }))
-      .filter((n) => pairProjects.has(n.project) || n.children.length > 0);
+      .filter((n) => treeHasPairTicket(n))
+      .map((n) => ({ ...n, children: pruneTree(n.children || []) }));
   }
 
-  const filteredBlockingTree = filterTree(blockingTree || []);
-  const filteredBlockers = (criticalBlockers || []).filter((b) => !pairProjects || pairProjects.has(b.project));
-  const filteredEdges = (crossProjectOnly ? crossProjectEdges : edges || [])
-    .filter((e) => !pairProjects || (pairProjects.has(e.fromProject) && pairProjects.has(e.toProject)));
-  const displayedEdges = filteredEdges;
+  const filteredBlockingTree = useMemo(() => pruneTree(blockingTree || []), [blockingTree, pairTicketKeys]);
+
+  // Filter flat blockers: show if the blocker or any of its blocked keys are in pair tickets
+  const filteredBlockers = useMemo(() => {
+    if (!pairTicketKeys) return criticalBlockers || [];
+    return (criticalBlockers || []).filter((b) =>
+      pairTicketKeys.has(b.key) || (b.blockedKeys || []).some((k) => pairTicketKeys.has(k))
+    );
+  }, [criticalBlockers, pairTicketKeys]);
 
   return (
     <div className="space-y-6">
       {/* Stats Row */}
       {stats && (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
-          <StatCard label="Total Issues" value={stats.totalNodes} />
-          <StatCard label="Total Links" value={stats.totalEdges} />
-          <StatCard label="Cross-Project Links" value={stats.crossProjectCount} color="text-blue-700" />
-          <StatCard label="Blocking Links" value={stats.blockingCount} color="text-red-700" />
-          <StatCard label="Cross-Project Blockers" value={stats.crossProjectBlockingCount} color="text-red-700" />
+          <StatCard label={selectedPair ? "Filtered Issues" : "Total Issues"} value={selectedPair ? (pairTicketKeys?.size || 0) : stats.totalNodes} />
+          <StatCard label={selectedPair ? "Filtered Links" : "Total Links"} value={selectedPair ? displayedEdges.length : stats.totalEdges} />
+          <StatCard label="Cross-Project Links" value={selectedPair ? displayedEdges.filter((e) => e.isCrossProject).length : stats.crossProjectCount} color="text-blue-700" />
+          <StatCard label="Blocking Links" value={selectedPair ? displayedEdges.filter((e) => e.direction?.toLowerCase().includes("block") || e.type?.toLowerCase().includes("block")).length : stats.blockingCount} color="text-red-700" />
+          <StatCard label="Blocking Tree Roots" value={selectedPair ? filteredBlockingTree.length : (blockingTree?.length || 0)} color="text-red-700" />
         </div>
       )}
 
