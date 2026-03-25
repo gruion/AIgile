@@ -6,6 +6,7 @@ import LayoutShell from "../components/LayoutShell";
 export const metadata = {
   title: "AIgileCoach",
   description: "AI-powered agile coaching & project compliance dashboard",
+  icons: { icon: "/favicon.svg" },
 };
 
 export default function RootLayout({ children }) {

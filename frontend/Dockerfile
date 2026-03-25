@@ -15,9 +15,10 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Copy standalone server + static assets
+# Copy standalone server + static assets + public files
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
 
 COPY --from=builder /app/entrypoint.sh ./entrypoint.sh
 RUN chmod +x entrypoint.sh

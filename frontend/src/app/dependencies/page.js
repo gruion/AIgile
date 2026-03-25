@@ -237,17 +237,12 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
   const [treeView, setTreeView] = useState(true);
   const [selectedPair, setSelectedPair] = useState(null); // null or [projA, projB]
 
-  if (loading) return <Spinner text="Loading dependency data..." />;
-  if (!data) return <div className="text-center py-12 text-gray-400 text-sm">No data loaded</div>;
+  const { nodes, edges, crossProjectEdges, projectMatrix, stats, criticalBlockers, blockingTree } = data || {};
 
-  const { nodes, edges, crossProjectEdges, projectMatrix, stats, criticalBlockers, blockingTree } = data;
-
-  // Filter by selected project pair
-  const pairSet = selectedPair ? new Set(selectedPair) : null;
-
-  // Build set of all ticket keys involved in edges between the selected pair
+  // All hooks MUST be before any conditional return (React rules of hooks)
   const pairTicketKeys = useMemo(() => {
-    if (!pairSet) return null;
+    if (!selectedPair) return null;
+    const pairSet = new Set(selectedPair);
     const keys = new Set();
     for (const e of (edges || [])) {
       if (pairSet.has(e.fromProject) && pairSet.has(e.toProject)) {
@@ -258,36 +253,37 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
     return keys;
   }, [selectedPair, edges]);
 
-  // Filter edges: show edges where both endpoints are in the pair's projects
   const displayedEdges = useMemo(() => {
     const base = crossProjectOnly ? (crossProjectEdges || []) : (edges || []);
-    if (!pairSet) return base;
+    if (!selectedPair) return base;
+    const pairSet = new Set(selectedPair);
     return base.filter((e) => pairSet.has(e.fromProject) && pairSet.has(e.toProject));
   }, [crossProjectOnly, crossProjectEdges, edges, selectedPair]);
 
-  // Filter tree: keep any branch that contains a ticket involved with the pair
-  function treeHasPairTicket(node) {
-    if (!pairTicketKeys) return true;
-    if (pairTicketKeys.has(node.key)) return true;
-    return (node.children || []).some((c) => treeHasPairTicket(c));
-  }
+  const filteredBlockingTree = useMemo(() => {
+    if (!pairTicketKeys) return blockingTree || [];
+    function hasPairTicket(node) {
+      if (pairTicketKeys.has(node.key)) return true;
+      return (node.children || []).some((c) => hasPairTicket(c));
+    }
+    function prune(treeNodes) {
+      return treeNodes
+        .filter((n) => hasPairTicket(n))
+        .map((n) => ({ ...n, children: prune(n.children || []) }));
+    }
+    return prune(blockingTree || []);
+  }, [blockingTree, pairTicketKeys]);
 
-  function pruneTree(treeNodes) {
-    if (!pairTicketKeys) return treeNodes;
-    return treeNodes
-      .filter((n) => treeHasPairTicket(n))
-      .map((n) => ({ ...n, children: pruneTree(n.children || []) }));
-  }
-
-  const filteredBlockingTree = useMemo(() => pruneTree(blockingTree || []), [blockingTree, pairTicketKeys]);
-
-  // Filter flat blockers: show if the blocker or any of its blocked keys are in pair tickets
   const filteredBlockers = useMemo(() => {
     if (!pairTicketKeys) return criticalBlockers || [];
     return (criticalBlockers || []).filter((b) =>
       pairTicketKeys.has(b.key) || (b.blockedKeys || []).some((k) => pairTicketKeys.has(k))
     );
   }, [criticalBlockers, pairTicketKeys]);
+
+  // Early returns AFTER all hooks
+  if (loading) return <Spinner text="Loading dependency data..." />;
+  if (!data) return <div className="text-center py-12 text-gray-400 text-sm">No data loaded</div>;
 
   return (
     <div className="space-y-6">
