@@ -260,19 +260,60 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
     return base.filter((e) => pairSet.has(e.fromProject) && pairSet.has(e.toProject));
   }, [crossProjectOnly, crossProjectEdges, edges, selectedPair]);
 
+  // When a pair is selected, build a mini blocking tree from the pair's blocking edges
+  // This catches blockers that are mid-chain (not global roots)
   const filteredBlockingTree = useMemo(() => {
     if (!pairTicketKeys) return blockingTree || [];
-    function hasPairTicket(node) {
-      if (pairTicketKeys.has(node.key)) return true;
-      return (node.children || []).some((c) => hasPairTicket(c));
+
+    // Get blocking edges between the pair's projects
+    const pairSet = new Set(selectedPair);
+    const pairBlockingEdges = (edges || []).filter((e) =>
+      pairSet.has(e.fromProject) && pairSet.has(e.toProject) &&
+      (e.direction?.toLowerCase().includes("block") || e.type?.toLowerCase().includes("block"))
+    );
+
+    if (pairBlockingEdges.length === 0) return [];
+
+    // Build adjacency: who blocks whom within this pair
+    const blockSets = {};
+    for (const e of pairBlockingEdges) {
+      if (!blockSets[e.from]) blockSets[e.from] = new Set();
+      blockSets[e.from].add(e.to);
     }
-    function prune(treeNodes) {
-      return treeNodes
-        .filter((n) => hasPairTicket(n))
-        .map((n) => ({ ...n, children: prune(n.children || []) }));
+
+    // Find roots: blockers that are NOT blocked by anyone within this pair
+    const allBlocked = new Set();
+    for (const e of pairBlockingEdges) allBlocked.add(e.to);
+    const roots = Object.keys(blockSets).filter((k) => !allBlocked.has(k));
+
+    // If no pure roots (cycle), use all blockers as roots
+    const rootKeys = roots.length > 0 ? roots : Object.keys(blockSets);
+
+    // Build node lookup from the flat nodes array
+    const nodeMap = {};
+    for (const n of (nodes || [])) nodeMap[n.key] = n;
+
+    // Recursive tree builder
+    function buildTree(key, visited = new Set()) {
+      if (visited.has(key)) return null;
+      visited.add(key);
+      const node = nodeMap[key];
+      if (!node) return null;
+      const childKeys = blockSets[key] || new Set();
+      return {
+        ...node,
+        blocksCount: childKeys.size,
+        children: [...childKeys]
+          .map((ck) => buildTree(ck, new Set(visited)))
+          .filter(Boolean),
+      };
     }
-    return prune(blockingTree || []);
-  }, [blockingTree, pairTicketKeys]);
+
+    return rootKeys
+      .map((k) => buildTree(k))
+      .filter(Boolean)
+      .sort((a, b) => b.blocksCount - a.blocksCount);
+  }, [blockingTree, pairTicketKeys, edges, nodes, selectedPair]);
 
   const filteredBlockers = useMemo(() => {
     if (!pairTicketKeys) return criticalBlockers || [];
