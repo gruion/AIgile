@@ -4,7 +4,7 @@
 services:
   jira:
     image: atlassian/jira-software:9.12-jdk17
-    container_name: jira-dashboard-jira
+    container_name: jira-standalone
     ports:
       - "${JIRA_PORT:-9080}:8080"
     environment:
@@ -20,14 +20,11 @@ services:
     depends_on:
       jira-db:
         condition: service_healthy
-    networks:
-      - jira-internal
-      - shared-net
     restart: unless-stopped
 
   jira-db:
     image: postgres:15-alpine
-    container_name: jira-dashboard-db
+    container_name: jira-standalone-db
     environment:
       - POSTGRES_DB=jira
       - POSTGRES_USER=jira
@@ -39,17 +36,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - jira-internal
     restart: unless-stopped
 
 volumes:
   jira-data:
   jira-db-data:
-
-networks:
-  jira-internal:
-    driver: bridge
-  shared-net:
-    name: aigilecoach-net
-    external: true
