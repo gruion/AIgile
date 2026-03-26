@@ -17,9 +17,10 @@ export default function SetupGuard() {
       .catch(() => setApiDown(true));
   }, [pathname]);
 
-  // Redirect to setup when needed
+  // Redirect to setup when needed (unless user skipped)
   useEffect(() => {
-    if (status?.needsSetup && pathname !== "/setup" && pathname !== "/settings") {
+    const skipped = typeof window !== "undefined" && sessionStorage.getItem("setup_skipped");
+    if (status?.needsSetup && !skipped && pathname !== "/setup" && pathname !== "/settings") {
       router.replace("/setup");
     }
   }, [status, pathname, router]);

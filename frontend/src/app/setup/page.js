@@ -159,12 +159,20 @@ export default function SetupWizard() {
             <p className="text-sm text-gray-600 mb-8 max-w-md mx-auto">
               AI-powered agile coaching dashboard. Let&apos;s connect your Jira to get started.
             </p>
-            <button
-              onClick={() => setStep(1)}
-              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
-            >
-              Get Started
-            </button>
+            <div className="flex flex-col items-center gap-3">
+              <button
+                onClick={() => setStep(1)}
+                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                Get Started
+              </button>
+              <button
+                onClick={() => { sessionStorage.setItem("setup_skipped", "1"); router.push("/"); }}
+                className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                Skip — I&apos;ll configure in Settings
+              </button>
+            </div>
           </div>
         )}
 
