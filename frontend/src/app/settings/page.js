@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { fetchSettings, updateSettings, fetchConfig, updateConfig, testConnection, importConfig, fetchAiSettings, updateAiSettings } from "../../lib/api";
 import { toast } from "../../components/Toaster";
 
@@ -45,6 +46,7 @@ const DEFAULT_MISSING_INFO = `A ticket is considered to have missing information
 - No story points or time estimate`;
 
 export default function SettingsPage() {
+  const router = useRouter();
   const [settings, setSettings] = useState(null);
   const [template, setTemplate] = useState("");
   const [missingInfoCriteria, setMissingInfoCriteria] = useState("");
@@ -162,6 +164,22 @@ export default function SettingsPage() {
           <h2 className="text-xl font-bold text-gray-900 mb-1">Settings</h2>
           <p className="text-sm text-gray-500">Configure how the dashboard connects to your Jira instance</p>
         </div>
+
+        {/* Setup wizard banner when no servers configured */}
+        {!loading && servers.length === 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-amber-800">No Jira server configured</p>
+              <p className="text-xs text-amber-600 mt-0.5">Use the setup wizard for a guided configuration, or add a server manually below.</p>
+            </div>
+            <button
+              onClick={() => { sessionStorage.removeItem("setup_skipped"); router.push("/setup"); }}
+              className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-lg transition-colors font-medium shrink-0"
+            >
+              Launch Setup Wizard
+            </button>
+          </div>
+        )}
 
         {loading && (
           <div className="flex items-center justify-center py-12">
