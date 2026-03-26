@@ -58,6 +58,7 @@ export default function SettingsPage() {
     wipLimitPerPerson: 3,
     wipLimitBoard: 0,
   });
+  const [storyPointSettings, setStoryPointSettings] = useState({ maxStoryPoints: 8 });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -83,6 +84,7 @@ export default function SettingsPage() {
         setTemplate(s.epicChildrenJqlTemplate || "");
         setMissingInfoCriteria(s.missingInfoCriteria || DEFAULT_MISSING_INFO);
         if (s.promptSettings) setPromptSettings((prev) => ({ ...prev, ...s.promptSettings }));
+        if (s.storyPointSettings) setStoryPointSettings(s.storyPointSettings);
         if (cfg.teams) setTeams(cfg.teams);
         if (cfg.servers) setServers(cfg.servers.map((s, i) => ({ ...s, _key: `srv-${i}-${Date.now()}` })));
         if (cfg.configSource) setConfigSource(cfg.configSource);
@@ -110,7 +112,7 @@ export default function SettingsPage() {
         ...(s._token ? { token: s._token } : {}),
       }));
       const [result, cfgResult] = await Promise.all([
-        updateSettings({ epicChildrenJqlTemplate: template, missingInfoCriteria, promptSettings }),
+        updateSettings({ epicChildrenJqlTemplate: template, missingInfoCriteria, promptSettings, storyPointSettings }),
         updateConfig({ teams, servers: serverPayloads, defaultTeamId }),
       ]);
       setSettings((prev) => ({ ...prev, ...result }));
@@ -408,6 +410,41 @@ export default function SettingsPage() {
                   />
                   <p className="text-[10px] text-gray-400 mt-1">0 = team_size x 2. Set manually to override.</p>
                 </div>
+              </div>
+            </div>
+
+            {/* Story Point Limits */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="text-sm font-semibold text-gray-800 mb-1">
+                Story Point Limits
+              </h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Tickets with story points above this limit will be flagged for splitting.
+                Values follow the Fibonacci sequence.
+              </p>
+              <div>
+                <label className="text-xs text-gray-600 font-medium">Maximum story points per ticket</label>
+                <div className="flex items-center gap-2 mt-2">
+                  {[1, 2, 3, 5, 8, 13, 21].map((v) => (
+                    <button
+                      key={v}
+                      onClick={() => setStoryPointSettings((prev) => ({ ...prev, maxStoryPoints: v }))}
+                      className={`w-10 h-10 rounded-lg border-2 text-sm font-bold transition-all ${
+                        storyPointSettings.maxStoryPoints === v
+                          ? "bg-blue-50 border-blue-500 text-blue-700 ring-2 ring-blue-200"
+                          : v > storyPointSettings.maxStoryPoints
+                            ? "bg-red-50 border-red-200 text-red-400"
+                            : "bg-gray-50 border-gray-200 text-gray-600 hover:border-gray-300"
+                      }`}
+                    >
+                      {v}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-400 mt-2">
+                  Current: <span className="font-bold">{storyPointSettings.maxStoryPoints}</span> — tickets above this will show a split alert.
+                  Values in <span className="text-red-400">red</span> exceed the limit.
+                </p>
               </div>
             </div>
 

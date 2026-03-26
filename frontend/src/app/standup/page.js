@@ -246,6 +246,44 @@ function SectionHeader({ title, count, accentColor, subtitle }) {
   );
 }
 
+function AccordionSection({ title, count, accentColor, borderColor, subtitle, children }) {
+  const [open, setOpen] = useState(false);
+  if (count === 0) return null;
+
+  return (
+    <div className={`bg-white rounded-xl border ${borderColor || "border-gray-200"} overflow-hidden`}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full px-4 py-3 flex items-center gap-2 hover:bg-gray-50/50 transition-colors text-left"
+      >
+        <div className={`w-1 h-8 rounded-full shrink-0 ${accentColor?.replace("border-", "bg-") || "bg-gray-400"}`} />
+        <div className="flex-1 min-w-0">
+          <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+          {subtitle && <p className="text-[10px] text-gray-400">{subtitle}</p>}
+        </div>
+        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+          count > 0 ? (accentColor?.includes("red") ? "bg-red-100 text-red-700" :
+            accentColor?.includes("amber") ? "bg-amber-100 text-amber-700" :
+            accentColor?.includes("orange") ? "bg-orange-100 text-orange-700" :
+            accentColor?.includes("green") ? "bg-green-100 text-green-700" :
+            accentColor?.includes("purple") ? "bg-purple-100 text-purple-700" :
+            "bg-blue-100 text-blue-700") : "bg-gray-100 text-gray-500"
+        }`}>
+          {count}
+        </span>
+        <svg className={`w-4 h-4 text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && (
+        <div className="px-4 pb-4 space-y-2">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WorkloadBar({ inProgress, todo, total }) {
   const maxBar = Math.max(total, 1);
   const wipPct = Math.round((inProgress / maxBar) * 100);
@@ -332,6 +370,15 @@ function StandupContent({ data, hours, prompts, onSuggestFix }) {
   const summary = data?.summary || {};
   const workload = data?.workload || {};
 
+  // Filter recentlyUpdated: exclude resolved and newly created tickets
+  const excludeKeys = useMemo(() => {
+    const keys = new Set();
+    for (const i of (data?.recentlyResolved || [])) keys.add(i.key);
+    for (const i of (data?.newlyCreated || [])) keys.add(i.key);
+    return keys;
+  }, [data?.recentlyResolved, data?.newlyCreated]);
+  const updatedOnly = useMemo(() => (data?.recentlyUpdated || []).filter((i) => !excludeKeys.has(i.key)), [data?.recentlyUpdated, excludeKeys]);
+
   return (
     <>
       {/* AI Coach Panel */}
@@ -356,96 +403,132 @@ function StandupContent({ data, hours, prompts, onSuggestFix }) {
 
       {/* Main Content: 2-column grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column */}
-        <div className="lg:col-span-2 space-y-5">
-          {data.recentlyUpdated?.length > 0 && (
-            <div className="bg-white rounded-xl border border-gray-200 p-4">
-              <SectionHeader title="Recently Updated" count={data.recentlyUpdated.length} accentColor="border-blue-500" subtitle={`Issues with activity in the last ${hours}h`} />
-              <div className="space-y-2">
-                {data.recentlyUpdated.map((issue) => (
-                  <DetailedIssueCard key={issue.key} issue={issue} onSuggestFix={onSuggestFix} />
-                ))}
+        {/* Left Column — Ticket sections as collapsible accordions */}
+        <div className="lg:col-span-2 space-y-3">
+          {/* 1. Stale Items */}
+          <AccordionSection
+            title="Stale Items"
+            count={data.stale?.length || 0}
+            accentColor="border-amber-500"
+            borderColor="border-amber-100"
+            subtitle="In Progress but no update in 7+ days"
+          >
+            {(data.stale || []).map((issue) => (
+              <div key={issue.key} className="border border-gray-100 rounded-lg p-3 hover:bg-gray-50/50 transition-colors">
+                <div className="flex items-start gap-2">
+                  <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
+                  <p className="text-xs text-gray-800 flex-1 min-w-0">{issue.summary}</p>
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 shrink-0">
+                    {issue.staleDays}d stale
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 mt-1.5 text-[10px] text-gray-500">
+                  {issue.assignee && <span>{issue.assignee}</span>}
+                  <StatusBadge status={issue.status} statusCategory={issue.statusCategory} />
+                  <span className="text-gray-400">Last updated {timeAgo(issue.updated)}</span>
+                  {onSuggestFix && (
+                    <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            ))}
+          </AccordionSection>
 
-          {data.blocked?.length > 0 && (
-            <div className="bg-white rounded-xl border border-red-100 p-4">
-              <SectionHeader title="Blocked Items" count={data.blocked.length} accentColor="border-red-500" subtitle="Items with 'block' label" />
-              <div className="space-y-2">
-                {data.blocked.map((issue) => (
-                  <DetailedIssueCard key={issue.key} issue={issue} onSuggestFix={onSuggestFix} />
-                ))}
+          {/* 2. Approaching Due */}
+          <AccordionSection
+            title="Approaching Due"
+            count={data.approachingDue?.length || 0}
+            accentColor="border-orange-500"
+            borderColor="border-orange-100"
+            subtitle="Due within 3 days"
+          >
+            {(data.approachingDue || []).map((issue) => (
+              <div key={issue.key} className="border border-gray-100 rounded-lg p-3 hover:bg-gray-50/50 transition-colors">
+                <div className="flex items-start gap-2">
+                  <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
+                  <p className="text-xs text-gray-800 flex-1 min-w-0">{issue.summary}</p>
+                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
+                    issue.daysLeft <= 1 ? "bg-red-100 text-red-700" : "bg-orange-100 text-orange-700"
+                  }`}>
+                    {issue.daysLeft === 0 ? "Today" : `${issue.daysLeft}d left`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 mt-1.5 text-[10px] text-gray-500">
+                  {issue.assignee && <span>{issue.assignee}</span>}
+                  <StatusBadge status={issue.status} statusCategory={issue.statusCategory} />
+                  <PriorityBadge priority={issue.priority} />
+                  {onSuggestFix && (
+                    <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            ))}
+          </AccordionSection>
 
-          {data.approachingDue?.length > 0 && (
-            <div className="bg-white rounded-xl border border-orange-100 p-4">
-              <SectionHeader title="Approaching Due" count={data.approachingDue.length} accentColor="border-orange-500" subtitle="Due within 3 days" />
-              <div className="space-y-2">
-                {data.approachingDue.map((issue) => (
-                  <div key={issue.key} className="border border-gray-100 rounded-lg p-3 hover:bg-gray-50/50 transition-colors">
-                    <div className="flex items-start gap-2">
-                      <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
-                      <p className="text-xs text-gray-800 flex-1 min-w-0">{issue.summary}</p>
-                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
-                        issue.daysLeft <= 1 ? "bg-red-100 text-red-700" : "bg-orange-100 text-orange-700"
-                      }`}>
-                        {issue.daysLeft === 0 ? "Today" : `${issue.daysLeft}d left`}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3 mt-1.5 text-[10px] text-gray-500">
-                      {issue.assignee && <span>{issue.assignee}</span>}
-                      <StatusBadge status={issue.status} statusCategory={issue.statusCategory} />
-                      <PriorityBadge priority={issue.priority} />
-                      {onSuggestFix && (
-                        <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          {/* 3. Recently Updated (excludes newly created and resolved) */}
+          <AccordionSection
+            title="Recently Updated"
+            count={updatedOnly.length}
+            accentColor="border-blue-500"
+            borderColor="border-blue-100"
+            subtitle={`Activity in the last ${hours}h (excludes new & resolved)`}
+          >
+            {updatedOnly.map((issue) => (
+              <DetailedIssueCard key={issue.key} issue={issue} onSuggestFix={onSuggestFix} />
+            ))}
+          </AccordionSection>
 
-          {data.recentlyResolved?.length > 0 && (
-            <div className="bg-white rounded-xl border border-green-100 p-4">
-              <SectionHeader title="Recently Resolved" count={data.recentlyResolved.length} accentColor="border-green-500" subtitle="Completed in this period" />
-              <div className="space-y-2">
-                {data.recentlyResolved.map((issue) => (
-                  <DetailedIssueCard key={issue.key} issue={issue} showComments={false} onSuggestFix={onSuggestFix} />
-                ))}
-              </div>
-            </div>
-          )}
+          {/* 4. Blocked Items */}
+          <AccordionSection
+            title="Blocked Items"
+            count={data.blocked?.length || 0}
+            accentColor="border-red-500"
+            borderColor="border-red-100"
+            subtitle="Items with 'block' label or link"
+          >
+            {(data.blocked || []).map((issue) => (
+              <DetailedIssueCard key={issue.key} issue={issue} onSuggestFix={onSuggestFix} />
+            ))}
+          </AccordionSection>
 
-          {data.stale?.length > 0 && (
-            <div className="bg-white rounded-xl border border-gray-200 p-4">
-              <SectionHeader title="Stale Items" count={data.stale.length} accentColor="border-gray-400" subtitle="In Progress but no update in 7+ days" />
-              <div className="space-y-2">
-                {data.stale.map((issue) => (
-                  <div key={issue.key} className="border border-gray-100 rounded-lg p-3 hover:bg-gray-50/50 transition-colors">
-                    <div className="flex items-start gap-2">
-                      <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
-                      <p className="text-xs text-gray-800 flex-1 min-w-0">{issue.summary}</p>
-                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 shrink-0">
-                        {issue.staleDays}d stale
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3 mt-1.5 text-[10px] text-gray-500">
-                      {issue.assignee && <span>{issue.assignee}</span>}
-                      <StatusBadge status={issue.status} statusCategory={issue.statusCategory} />
-                      <span className="text-gray-400">Last updated {timeAgo(issue.updated)}</span>
-                      {onSuggestFix && (
-                        <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
-                      )}
-                    </div>
-                  </div>
-                ))}
+          {/* 5. Recently Resolved */}
+          <AccordionSection
+            title="Recently Resolved"
+            count={data.recentlyResolved?.length || 0}
+            accentColor="border-green-500"
+            borderColor="border-green-100"
+            subtitle="Completed in this period"
+          >
+            {(data.recentlyResolved || []).map((issue) => (
+              <DetailedIssueCard key={issue.key} issue={issue} showComments={false} onSuggestFix={onSuggestFix} />
+            ))}
+          </AccordionSection>
+
+          {/* 6. Newly Created */}
+          <AccordionSection
+            title="Newly Created"
+            count={data.newlyCreated?.length || 0}
+            accentColor="border-purple-500"
+            borderColor="border-purple-100"
+            subtitle="Created in this period"
+          >
+            {(data.newlyCreated || []).map((issue) => (
+              <div key={issue.key} className="border border-gray-100 rounded-lg p-2.5 hover:bg-gray-50/50 transition-colors">
+                <div className="flex items-start gap-2">
+                  <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
+                  <p className="text-xs text-gray-800 flex-1 min-w-0 truncate">{issue.summary}</p>
+                </div>
+                <div className="flex items-center gap-2 mt-1.5 text-[10px] text-gray-500">
+                  {issue.assignee ? <span>{issue.assignee}</span> : <span className="text-orange-500">Unassigned</span>}
+                  <span className="text-gray-400">{issue.issueType}</span>
+                  <PriorityBadge priority={issue.priority} />
+                  {onSuggestFix && (
+                    <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            ))}
+          </AccordionSection>
         </div>
 
         {/* Right Column */}
@@ -488,30 +571,6 @@ function StandupContent({ data, hours, prompts, onSuggestFix }) {
           </div>
 
           <CommentFeed comments={data.recentComments} />
-
-          {data.newlyCreated?.length > 0 && (
-            <div className="bg-white rounded-xl border border-gray-200 p-4">
-              <SectionHeader title="Newly Created" count={data.newlyCreated.length} accentColor="border-purple-500" subtitle="Created in this period" />
-              <div className="space-y-2">
-                {data.newlyCreated.map((issue) => (
-                  <div key={issue.key} className="border border-gray-100 rounded-lg p-2.5 hover:bg-gray-50/50 transition-colors">
-                    <div className="flex items-start gap-2">
-                      <IssueLink jiraBaseUrl={jiraBaseUrl} issueKey={issue.key} />
-                      <p className="text-xs text-gray-800 flex-1 min-w-0 truncate">{issue.summary}</p>
-                    </div>
-                    <div className="flex items-center gap-2 mt-1.5 text-[10px] text-gray-500">
-                      {issue.assignee ? <span>{issue.assignee}</span> : <span className="text-orange-500">Unassigned</span>}
-                      <span className="text-gray-400">{issue.issueType}</span>
-                      <PriorityBadge priority={issue.priority} />
-                      {onSuggestFix && (
-                        <button onClick={() => onSuggestFix(issue)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-colors whitespace-nowrap">Suggest Fix</button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       </div>
 

@@ -404,6 +404,26 @@ export async function askAiCoach(context, question, data) {
   return res.json();
 }
 
+// ─── Sprint Prioritization ──────────────────────────────
+
+export async function fetchPrioritization(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await apiFetch(`${API_URL}/prioritize?${params}`);
+  if (!res.ok) await throwApiError(res, "Failed to prioritize tickets");
+  return res.json();
+}
+
+// ─── Expertise / SME Detection ──────────────────────────
+
+export async function fetchExpertise(jql) {
+  const params = new URLSearchParams();
+  if (jql) params.set("jql", jql);
+  const res = await apiFetch(`${API_URL}/expertise?${params}`);
+  if (!res.ok) await throwApiError(res, "Failed to analyze expertise");
+  return res.json();
+}
+
 // ─── RACI Matrix ─────────────────────────────────────────
 
 export async function fetchRaciMatrices() {

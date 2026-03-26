@@ -70,6 +70,21 @@ function ProjectBadge({ project }) {
   );
 }
 
+function ClickableProjectBadge({ project, onClick, selectedFilter }) {
+  const isActive = selectedFilter?.length === 1 && selectedFilter[0] === project;
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onClick(project); }}
+      className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold border cursor-pointer transition-all hover:ring-2 hover:ring-blue-300 ${
+        isActive ? "ring-2 ring-blue-400 shadow-sm" : ""
+      } ${projectColor(project)}`}
+      title={`Filter by ${project}`}
+    >
+      {project}
+    </button>
+  );
+}
+
 function JiraLink({ issueKey, jiraBaseUrl, children }) {
   return (
     <a
@@ -179,9 +194,9 @@ function BlockingTreeNode({ node, depth = 0, jiraBaseUrl }) {
           </span>
         )}
 
-        {/* Connector line for non-root */}
+        {/* Connector — parent blocks this ticket */}
         {!isRoot && (
-          <span className="text-red-300 text-xs font-mono shrink-0">{"──"}</span>
+          <span className="text-[8px] text-red-400 font-medium shrink-0">← blocks</span>
         )}
 
         {/* Project badge */}
@@ -235,69 +250,111 @@ function BlockingTreeNode({ node, depth = 0, jiraBaseUrl }) {
 function JiraLinksTab({ data, loading, jiraBaseUrl }) {
   const [crossProjectOnly, setCrossProjectOnly] = useState(true);
   const [treeView, setTreeView] = useState(true);
-  const [selectedPair, setSelectedPair] = useState(null); // null or [projA, projB]
+  const [selectedFilter, setSelectedFilter] = useState(null); // null, [projA, projB] (pair), or [projA] (single)
+  const [hideDone, setHideDone] = useState(true);
 
   const { nodes, edges, crossProjectEdges, projectMatrix, stats, criticalBlockers, blockingTree } = data || {};
 
-  // All hooks MUST be before any conditional return (React rules of hooks)
+  const isSingleProject = selectedFilter?.length === 1;
+  const filterSet = selectedFilter ? new Set(selectedFilter) : null;
+
+  // Click a project badge to filter by single project
+  const handleProjectClick = (project) => {
+    if (selectedFilter?.length === 1 && selectedFilter[0] === project) {
+      setSelectedFilter(null); // toggle off
+    } else {
+      setSelectedFilter([project]);
+    }
+  };
+
+  // Collect ticket keys involved in filtered edges
   const pairTicketKeys = useMemo(() => {
-    if (!selectedPair) return null;
-    const pairSet = new Set(selectedPair);
+    if (!filterSet) return null;
     const keys = new Set();
     for (const e of (edges || [])) {
-      if (pairSet.has(e.fromProject) && pairSet.has(e.toProject)) {
+      // For single project: show edges where at least one side is in the project
+      // For pair: show edges where both sides are in the pair
+      const match = isSingleProject
+        ? (filterSet.has(e.fromProject) || filterSet.has(e.toProject))
+        : (filterSet.has(e.fromProject) && filterSet.has(e.toProject));
+      if (match) {
         keys.add(e.from);
         keys.add(e.to);
       }
     }
     return keys;
-  }, [selectedPair, edges]);
+  }, [selectedFilter, edges]);
 
-  const displayedEdges = useMemo(() => {
-    const base = crossProjectOnly ? (crossProjectEdges || []) : (edges || []);
-    if (!selectedPair) return base;
-    const pairSet = new Set(selectedPair);
-    return base.filter((e) => pairSet.has(e.fromProject) && pairSet.has(e.toProject));
-  }, [crossProjectOnly, crossProjectEdges, edges, selectedPair]);
-
-  // Node lookup
+  // Node lookup (needed for done status check and tree building)
   const nodeMap = useMemo(() => {
     const map = {};
     for (const n of (nodes || [])) map[n.key] = n;
     return map;
   }, [nodes]);
 
-  // Build blocking tree + flat list from pair's edges (or global when no filter)
+  // Filter edges — for single project, ignore cross-project-only toggle and show all
+  const displayedEdges = useMemo(() => {
+    let base;
+    if (!filterSet) {
+      base = crossProjectOnly ? (crossProjectEdges || []) : (edges || []);
+    } else {
+      base = (edges || []).filter((e) =>
+        isSingleProject
+          ? (filterSet.has(e.fromProject) || filterSet.has(e.toProject))
+          : (filterSet.has(e.fromProject) && filterSet.has(e.toProject))
+      );
+    }
+    if (hideDone) {
+      base = base.filter((e) => {
+        const fromDone = nodeMap[e.from]?.statusCategory === "done";
+        const toDone = nodeMap[e.to]?.statusCategory === "done" || e.toStatusCategory === "done";
+        return !fromDone && !toDone;
+      });
+    }
+    return base;
+  }, [crossProjectOnly, crossProjectEdges, edges, selectedFilter, hideDone, nodeMap]);
+
+
+  // Build blocking tree + flat list from filtered edges (or global when no filter)
   const { filteredBlockingTree, filteredBlockers } = useMemo(() => {
-    if (!selectedPair) {
-      return { filteredBlockingTree: blockingTree || [], filteredBlockers: criticalBlockers || [] };
+    // Helper: is a ticket done?
+    const isDone = (key) => nodeMap[key]?.statusCategory === "done";
+
+    if (!selectedFilter) {
+      if (!hideDone) return { filteredBlockingTree: blockingTree || [], filteredBlockers: criticalBlockers || [] };
+      // Filter done from global tree
+      function pruneDone(treeNodes) {
+        return treeNodes
+          .filter((n) => !isDone(n.key))
+          .map((n) => ({ ...n, children: pruneDone(n.children || []) }));
+      }
+      return {
+        filteredBlockingTree: pruneDone(blockingTree || []),
+        filteredBlockers: (criticalBlockers || []).filter((b) => !isDone(b.key)),
+      };
     }
 
-    const pairSet = new Set(selectedPair);
-
-    // Get ALL blocking edges between the pair
-    const pairBlockingEdges = (edges || []).filter((e) =>
-      pairSet.has(e.fromProject) && pairSet.has(e.toProject) &&
-      (e.direction?.toLowerCase().includes("block") || e.type?.toLowerCase().includes("block"))
-    );
+    // Get blocking edges matching the filter
+    const pairBlockingEdges = (edges || []).filter((e) => {
+      const isBlocking = e.direction?.toLowerCase().includes("block") || e.type?.toLowerCase().includes("block");
+      if (!isBlocking) return false;
+      if (hideDone && (isDone(e.from) || isDone(e.to))) return false;
+      return isSingleProject
+        ? (filterSet.has(e.fromProject) || filterSet.has(e.toProject))
+        : (filterSet.has(e.fromProject) && filterSet.has(e.toProject));
+    });
 
     if (pairBlockingEdges.length === 0) {
       return { filteredBlockingTree: [], filteredBlockers: [] };
     }
 
-    // Deduplicate: normalize direction so "A is blocked by B" becomes "B blocks A"
+    // Deduplicate: from is always the blocker, to is always the blocked
+    // (backend builds edges so from=blocker in both "blocks" and "is blocked by" directions)
     const blockSets = {}; // blocker -> Set of blocked keys
     const seenPairs = new Set();
     for (const e of pairBlockingEdges) {
-      const dir = (e.direction || "").toLowerCase();
-      let blocker, blocked;
-      if (dir.includes("is blocked by")) {
-        blocker = e.to;   // the other ticket is the blocker
-        blocked = e.from;
-      } else {
-        blocker = e.from;
-        blocked = e.to;
-      }
+      const blocker = e.from;
+      const blocked = e.to;
       const dedupKey = blocker + ":" + blocked;
       if (seenPairs.has(dedupKey)) continue;
       seenPairs.add(dedupKey);
@@ -305,11 +362,27 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
       blockSets[blocker].add(blocked);
     }
 
-    // Find local roots: blockers not blocked by anyone within this pair
+    // Find local roots:
+    // 1. Pure roots: blockers not blocked by anyone
+    // 2. Mutual cycle roots: A blocks B AND B blocks A — pick one per cycle
     const allBlocked = new Set();
     for (const s of Object.values(blockSets)) for (const k of s) allBlocked.add(k);
-    const rootKeys = Object.keys(blockSets).filter((k) => !allBlocked.has(k));
-    const finalRoots = rootKeys.length > 0 ? rootKeys : Object.keys(blockSets);
+    const pureRoots = Object.keys(blockSets).filter((k) => !allBlocked.has(k));
+
+    // Find mutual blockers not reachable from pure roots
+    const reachable = new Set();
+    function walk(key) {
+      if (reachable.has(key)) return;
+      reachable.add(key);
+      for (const child of (blockSets[key] || [])) walk(child);
+    }
+    for (const r of pureRoots) walk(r);
+
+    // Any blocker not reachable from pure roots is an orphan — add as root
+    const orphanRoots = Object.keys(blockSets).filter((k) => !reachable.has(k));
+    const finalRoots = [...pureRoots, ...orphanRoots];
+    // If still empty, use all blockers
+    const roots = finalRoots.length > 0 ? finalRoots : Object.keys(blockSets);
 
     // Build tree — include blocked tickets as leaf nodes even if they don't block anything
     function buildTree(key, visited = new Set()) {
@@ -327,7 +400,7 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
       };
     }
 
-    const tree = finalRoots
+    const tree = roots
       .map((k) => buildTree(k))
       .filter(Boolean)
       .sort((a, b) => b.blocksCount - a.blocksCount);
@@ -342,220 +415,184 @@ function JiraLinksTab({ data, loading, jiraBaseUrl }) {
       .sort((a, b) => b.blocksCount - a.blocksCount);
 
     return { filteredBlockingTree: tree, filteredBlockers: flatBlockers };
-  }, [selectedPair, blockingTree, criticalBlockers, edges, nodeMap]);
+  }, [selectedFilter, blockingTree, criticalBlockers, edges, nodeMap, hideDone]);
+
+  // Deduplicated edges for links view: normalize "is blocked by" → "blocks", skip duplicates
+  // Deduplicate edges: normalize all to "blocker → blocked" direction
+  // "A is blocked by B" and "B blocks A" are the SAME relationship → keep one (B blocks A)
+  // "A blocks B" and "B blocks A" are DIFFERENT (mutual block) → keep both
+  // Deduplicate edges: from=blocker (left), to=blocked (right) in all cases
+  // "blocks" and "is blocked by" edges with same from→to are the same relationship
+  const deduplicatedEdges = useMemo(() => {
+    const seen = new Set();
+    const result = [];
+    for (const e of displayedEdges) {
+      const dir = (e.direction || "").toLowerCase();
+      // from is always the blocker, to is always the blocked (backend guarantees this)
+      const direction = dir.includes("block") ? "blocks" : (e.direction || e.type);
+      // Dedup: from→to directional key (mutual blocks A→B and B→A are kept as separate)
+      const dedupKey = e.from + "→" + e.to + ":" + (e.type || "");
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+      result.push({ ...e, direction });
+    }
+    return result;
+  }, [displayedEdges]);
 
   // Early returns AFTER all hooks
   if (loading) return <Spinner text="Loading dependency data..." />;
   if (!data) return <div className="text-center py-12 text-gray-400 text-sm">No data loaded</div>;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Stats Row */}
       {stats && (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
-          <StatCard label={selectedPair ? "Filtered Issues" : "Total Issues"} value={selectedPair ? (pairTicketKeys?.size || 0) : stats.totalNodes} />
-          <StatCard label={selectedPair ? "Filtered Links" : "Total Links"} value={selectedPair ? displayedEdges.length : stats.totalEdges} />
-          <StatCard label="Cross-Project Links" value={selectedPair ? displayedEdges.filter((e) => e.isCrossProject).length : stats.crossProjectCount} color="text-blue-700" />
-          <StatCard label="Blocking Links" value={selectedPair ? displayedEdges.filter((e) => e.direction?.toLowerCase().includes("block") || e.type?.toLowerCase().includes("block")).length : stats.blockingCount} color="text-red-700" />
-          <StatCard label="Blocking Tree Roots" value={selectedPair ? filteredBlockingTree.length : (blockingTree?.length || 0)} color="text-red-700" />
+          <StatCard label={selectedFilter ? "Filtered Issues" : "Total Issues"} value={selectedFilter ? (pairTicketKeys?.size || 0) : stats.totalNodes} />
+          <StatCard label={selectedFilter ? "Filtered Links" : "Total Links"} value={selectedFilter ? deduplicatedEdges.length : stats.totalEdges} />
+          <StatCard label="Cross-Project" value={selectedFilter ? deduplicatedEdges.filter((e) => e.isCrossProject).length : stats.crossProjectCount} color="text-blue-700" />
+          <StatCard label="Blocking" value={selectedFilter ? deduplicatedEdges.filter((e) => e.direction?.toLowerCase().includes("block")).length : stats.blockingCount} color="text-red-700" />
+          <StatCard label="Tree Roots" value={selectedFilter ? filteredBlockingTree.length : (blockingTree?.length || 0)} color="text-red-700" />
         </div>
       )}
 
-      {/* Active filter banner */}
-      {selectedPair && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-            </svg>
-            <span className="text-sm text-blue-800">
-              Filtered: <ProjectBadge project={selectedPair[0]} /> <span className="text-blue-400 mx-1">↔</span> <ProjectBadge project={selectedPair[1]} />
-            </span>
-          </div>
-          <button
-            onClick={() => setSelectedPair(null)}
-            className="text-xs text-blue-600 hover:text-blue-800 font-medium px-2 py-1 rounded hover:bg-blue-100 transition-colors"
-          >
-            Clear filter
-          </button>
-        </div>
-      )}
-
-      {/* Blocking Dependency Tree */}
-      {(filteredBlockingTree.length > 0 || filteredBlockers.length > 0) && (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold text-gray-900">Blocking Dependency Tree</h2>
-              <p className="text-[10px] text-gray-500 mt-0.5">
-                Resolve top-level blockers first — they unblock the most tickets downstream
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setTreeView(true)}
-                className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
-                  treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
-                }`}
-              >
-                Tree View
-              </button>
-              <button
-                onClick={() => setTreeView(false)}
-                className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
-                  !treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
-                }`}
-              >
-                Flat List
-              </button>
-            </div>
-          </div>
-
-          <div className="p-4">
-            {treeView && filteredBlockingTree.length > 0 ? (
-              <div className="space-y-3">
-                {filteredBlockingTree.map((root) => (
-                  <BlockingTreeNode key={root.key} node={root} depth={0} jiraBaseUrl={jiraBaseUrl} />
-                ))}
-              </div>
-            ) : treeView && filteredBlockingTree.length === 0 ? (
-              <div className="text-center py-6 text-gray-400 text-sm">
-                No blocking chains found — no tickets block other tickets.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {filteredBlockers.map((blocker, i) => (
-                  <div key={i} className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-gray-50">
-                    <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-red-100 text-red-700 font-bold text-xs shrink-0">
-                      {blocker.blocksCount}
-                    </span>
-                    <ProjectBadge project={blocker.project} />
-                    <JiraLink issueKey={blocker.key} jiraBaseUrl={jiraBaseUrl} />
-                    <StatusBadge status={blocker.status} />
-                    <span className="text-xs text-gray-600 truncate flex-1 min-w-0">{blocker.summary}</span>
-                    {blocker.isCrossProject && (
-                      <span className="text-[9px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full shrink-0">cross-project</span>
-                    )}
-                    <span className="text-[10px] text-red-600 font-medium shrink-0">
-                      blocks {blocker.blocksCount}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Project Matrix */}
+      {/* Compact Project Matrix — horizontal pill bar */}
       {projectMatrix && projectMatrix.length > 0 && (
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">Project Matrix</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="bg-white rounded-xl border border-gray-200 px-4 py-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider shrink-0 mr-1">Projects:</span>
             {projectMatrix.map((pm, i) => {
-              const isSelected = selectedPair && pm.projects[0] === selectedPair[0] && pm.projects[1] === selectedPair[1];
+              const isSelected = selectedFilter?.length === 2 && pm.projects[0] === selectedFilter[0] && pm.projects[1] === selectedFilter[1];
               return (
-                <div
+                <button
                   key={i}
-                  onClick={() => setSelectedPair(isSelected ? null : [...pm.projects])}
-                  className={`bg-white rounded-lg p-4 border-2 cursor-pointer transition-all hover:shadow-md ${
+                  onClick={() => setSelectedFilter(isSelected ? null : [...pm.projects])}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] border transition-all cursor-pointer ${
                     isSelected
-                      ? "border-blue-500 ring-2 ring-blue-200 shadow-sm"
+                      ? "bg-blue-50 border-blue-400 text-blue-700 ring-1 ring-blue-300 font-semibold"
                       : pm.blocking > 0
-                        ? "border-red-400 hover:border-red-500"
-                        : "border-gray-200 hover:border-gray-300"
+                        ? "bg-red-50 border-red-200 text-red-700 hover:bg-red-100"
+                        : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
                   }`}
                 >
-                  <div className="flex items-center gap-2 mb-2">
-                    {pm.projects.map((p) => (
-                      <ProjectBadge key={p} project={p} />
-                    ))}
-                    {isSelected && (
-                      <span className="text-[9px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded-full ml-auto">filtered</span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-4 text-sm">
-                    <span className="text-gray-600">
-                      <span className="font-semibold text-gray-900">{pm.count}</span> links
-                    </span>
-                    {pm.blocking > 0 && (
-                      <span className="text-red-600 font-medium">
-                        {pm.blocking} blocking
-                      </span>
-                    )}
-                  </div>
-                </div>
+                  <ClickableProjectBadge project={pm.projects[0]} onClick={handleProjectClick} selectedFilter={selectedFilter} />
+                  <span className="text-gray-300">↔</span>
+                  <ClickableProjectBadge project={pm.projects[1]} onClick={handleProjectClick} selectedFilter={selectedFilter} />
+                  <span className="font-mono text-[10px]">{pm.count}</span>
+                  {pm.blocking > 0 && <span className="text-[9px] bg-red-100 text-red-600 px-1 rounded">🔒{pm.blocking}</span>}
+                </button>
               );
             })}
           </div>
         </div>
       )}
 
-      {/* Cross-Project Dependency List */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold text-gray-900">Dependency Links</h2>
-          <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={crossProjectOnly}
-              onChange={(e) => setCrossProjectOnly(e.target.checked)}
-              className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-            />
-            Cross-project only
-          </label>
+      {/* Active filter banner */}
+      {selectedFilter && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm text-blue-800">
+            <svg className="w-3.5 h-3.5 text-blue-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+            </svg>
+            {isSingleProject ? (
+              <><ProjectBadge project={selectedFilter[0]} /> <span className="text-blue-400">(all dependencies)</span></>
+            ) : (
+              <><ProjectBadge project={selectedFilter[0]} /> <span className="text-blue-400 mx-1">↔</span> <ProjectBadge project={selectedFilter[1]} /></>
+            )}
+          </div>
+          <button onClick={() => setSelectedFilter(null)} className="text-[10px] text-blue-600 hover:text-blue-800 font-medium px-2 py-0.5 rounded hover:bg-blue-100">
+            Clear
+          </button>
+        </div>
+      )}
+
+      {/* Dependencies — Tree / Links toggle */}
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900">Dependencies</h2>
+            <p className="text-[10px] text-gray-500 mt-0.5">
+              {treeView ? "Resolve top-level blockers first — they unblock the most downstream" : `${deduplicatedEdges.length} links (deduplicated, blocker on left)`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-[10px] text-gray-500 cursor-pointer mr-1">
+              <input type="checkbox" checked={hideDone} onChange={(e) => setHideDone(e.target.checked)} className="rounded border-gray-300 text-green-600 w-3 h-3" />
+              Hide done
+            </label>
+            {!selectedFilter && !treeView && (
+              <label className="flex items-center gap-1.5 text-[10px] text-gray-500 cursor-pointer mr-1">
+                <input type="checkbox" checked={crossProjectOnly} onChange={(e) => setCrossProjectOnly(e.target.checked)} className="rounded border-gray-300 text-blue-600 w-3 h-3" />
+                Cross-project only
+              </label>
+            )}
+            <button
+              onClick={() => setTreeView(true)}
+              className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
+                treeView ? "bg-red-50 text-red-700 border-red-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+              }`}
+            >
+              Tree
+            </button>
+            <button
+              onClick={() => setTreeView(false)}
+              className={`text-[10px] px-2.5 py-1 rounded-md border transition-colors ${
+                !treeView ? "bg-blue-50 text-blue-700 border-blue-200 font-medium" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+              }`}
+            >
+              Links
+            </button>
+          </div>
         </div>
 
-        {displayedEdges.length === 0 ? (
-          <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-400 text-sm">
-            No dependency links found
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {displayedEdges.map((edge, i) => (
-              <div
-                key={i}
-                className="bg-white rounded-lg border border-gray-200 p-3 flex flex-wrap items-center gap-3 hover:shadow-sm transition-shadow"
-              >
-                {/* From */}
-                <div className="flex items-center gap-2 min-w-0 flex-1">
+        <div className="p-4">
+          {/* Tree View */}
+          {treeView && filteredBlockingTree.length > 0 && (
+            <div className="space-y-3">
+              {filteredBlockingTree.map((root) => (
+                <BlockingTreeNode key={root.key} node={root} depth={0} jiraBaseUrl={jiraBaseUrl} />
+              ))}
+            </div>
+          )}
+          {treeView && filteredBlockingTree.length === 0 && (
+            <div className="text-center py-6 text-gray-400 text-sm">
+              No blocking chains found.
+            </div>
+          )}
+
+          {/* Links View (deduplicated, blocker on left) */}
+          {!treeView && deduplicatedEdges.length > 0 && (
+            <div className="space-y-1.5">
+              {deduplicatedEdges.map((edge, i) => (
+                <div key={i} className="flex items-center gap-2 py-2 px-3 rounded-lg hover:bg-gray-50 text-xs">
+                  {/* From */}
                   <ProjectBadge project={edge.fromProject} />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <JiraLink issueKey={edge.from} jiraBaseUrl={jiraBaseUrl} />
-                      {edge.fromStatus && <StatusBadge status={edge.fromStatus} />}
-                    </div>
-                    {edge.fromSummary && (
-                      <p className="text-xs text-gray-500 truncate mt-0.5">{edge.fromSummary}</p>
-                    )}
-                  </div>
-                </div>
+                  <JiraLink issueKey={edge.from} jiraBaseUrl={jiraBaseUrl} />
+                  {edge.fromStatus && <StatusBadge status={edge.fromStatus} />}
+                  <span className="text-gray-500 truncate max-w-[200px] hidden lg:inline">{edge.fromSummary}</span>
 
-                {/* Arrow / Direction */}
-                <div className="flex flex-col items-center gap-0.5 shrink-0 px-2">
-                  <span className="text-[9px] text-gray-400 font-medium">{edge.direction || edge.type}</span>
-                  <svg className="w-5 h-5 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                  </svg>
-                </div>
+                  {/* Direction */}
+                  <span className={`shrink-0 text-[9px] font-medium px-1.5 py-0.5 rounded ${
+                    edge.direction?.toLowerCase().includes("block") ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-500"
+                  }`}>
+                    {edge.direction || edge.type} →
+                  </span>
 
-                {/* To */}
-                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  {/* To */}
                   <ProjectBadge project={edge.toProject} />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <JiraLink issueKey={edge.to} jiraBaseUrl={jiraBaseUrl} />
-                      {edge.toStatus && <StatusBadge status={edge.toStatus} />}
-                    </div>
-                    {edge.toSummary && (
-                      <p className="text-xs text-gray-500 truncate mt-0.5">{edge.toSummary}</p>
-                    )}
-                  </div>
+                  <JiraLink issueKey={edge.to} jiraBaseUrl={jiraBaseUrl} />
+                  {edge.toStatus && <StatusBadge status={edge.toStatus} />}
+                  <span className="text-gray-500 truncate flex-1 min-w-0 hidden lg:inline">{edge.toSummary}</span>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+          {!treeView && deduplicatedEdges.length === 0 && (
+            <div className="text-center py-6 text-gray-400 text-sm">
+              No dependency links found.
+            </div>
+          )}
+        </div>
       </div>
 
     </div>

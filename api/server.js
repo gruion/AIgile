@@ -212,6 +212,13 @@ const DEFAULT_MISSING_INFO_CRITERIA = `A ticket is considered to have missing in
 - No story points or time estimate`;
 let MISSING_INFO_CRITERIA = process.env.MISSING_INFO_CRITERIA || DEFAULT_MISSING_INFO_CRITERIA;
 
+// Story point settings — Fibonacci sequence limits
+const FIBONACCI = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
+let STORY_POINT_SETTINGS = {
+  maxStoryPoints: parseInt(process.env.MAX_STORY_POINTS) || 8, // tickets above this trigger split alert
+  allowedValues: FIBONACCI, // valid story point values
+};
+
 // Prompt control settings
 let PROMPT_SETTINGS = {
   maxTickets: parseInt(process.env.PROMPT_MAX_TICKETS) || 100,
@@ -530,6 +537,7 @@ app.get("/settings", (req, res) => {
     defaultJql: DEFAULT_JQL,
     missingInfoCriteria: MISSING_INFO_CRITERIA,
     promptSettings: PROMPT_SETTINGS,
+    storyPointSettings: STORY_POINT_SETTINGS,
   });
 });
 
@@ -547,11 +555,19 @@ app.post("/settings", (req, res) => {
     PROMPT_SETTINGS = { ...PROMPT_SETTINGS, ...promptSettings };
     console.log(`Prompt settings updated:`, PROMPT_SETTINGS);
   }
+  if (req.body.storyPointSettings && typeof req.body.storyPointSettings === "object") {
+    const sp = req.body.storyPointSettings;
+    if (typeof sp.maxStoryPoints === "number" && FIBONACCI.includes(sp.maxStoryPoints)) {
+      STORY_POINT_SETTINGS.maxStoryPoints = sp.maxStoryPoints;
+    }
+    console.log(`Story point settings updated: max=${STORY_POINT_SETTINGS.maxStoryPoints}`);
+  }
   res.json({
     epicChildrenJqlTemplate: EPIC_CHILDREN_JQL_TEMPLATE,
     hasEpicLinkJql: HAS_EPIC_LINK_JQL,
     missingInfoCriteria: MISSING_INFO_CRITERIA,
     promptSettings: PROMPT_SETTINGS,
+    storyPointSettings: STORY_POINT_SETTINGS,
   });
 });
 
@@ -2551,6 +2567,35 @@ app.get("/compliance/projects", async (req, res) => {
         action: raciScore < 8 ? { label: "Create RACI", keys: [], serverUrl: getBrowserUrl(server) } : null,
       });
 
+      // Bus Factor check (10 pts) — knowledge distribution across team
+      // Count unique assignees on resolved tickets for this project
+      const resolvedByPerson = {};
+      for (const issue of issues) {
+        if (statusCat(issue) === "done" && issue.fields.assignee?.displayName) {
+          const person = issue.fields.assignee.displayName;
+          resolvedByPerson[person] = (resolvedByPerson[person] || 0) + 1;
+        }
+      }
+      const resolvers = Object.keys(resolvedByPerson);
+      const resolvedTotal = Object.values(resolvedByPerson).reduce((s, v) => s + v, 0);
+      const topResolver = resolvers.length > 0 ? resolvers.sort((a, b) => resolvedByPerson[b] - resolvedByPerson[a])[0] : null;
+      const topResolverPct = topResolver && resolvedTotal > 0 ? Math.round((resolvedByPerson[topResolver] / resolvedTotal) * 100) : 0;
+      let busScore = 0;
+      if (resolvers.length >= 4) busScore = 10;
+      else if (resolvers.length === 3) busScore = 8;
+      else if (resolvers.length === 2) busScore = 5;
+      else if (resolvers.length === 1) busScore = 2;
+      if (topResolverPct > 70 && busScore > 5) busScore = Math.min(busScore, 5); // penalize over-reliance
+      checks.push({
+        id: "bus-factor", name: "Bus Factor (Knowledge Distribution)", score: busScore, maxScore: 10,
+        status: busScore >= 8 ? "pass" : busScore >= 5 ? "warning" : "fail",
+        description: `${resolvers.length} people have resolved tickets in this project. A healthy team has 3+ contributors. If one person holds all the knowledge, their absence creates critical risk.`,
+        detail: topResolver
+          ? `${resolvers.length} contributors. Top resolver: ${topResolver} (${topResolverPct}% of resolved tickets).`
+          : "No resolved tickets found to analyze.",
+        action: null,
+      });
+
       const totalScore = checks.reduce((s, c) => s + c.score, 0);
       const maxPossible = checks.reduce((s, c) => s + c.maxScore, 0);
       const overallPct = Math.round((totalScore / maxPossible) * 100);
@@ -3363,6 +3408,297 @@ app.delete("/sprint-goals/:id", (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Expertise / SME Detection ──────────────────────────
+
+app.get("/expertise", async (req, res) => {
+  try {
+    const server = resolveServerFromReq(req);
+    if (!server) return res.status(400).json({ error: "No Jira server configured" });
+
+    const jql = req.query.jql || `project = ${TEAMS[0]?.projectKey || "TEAM"} ORDER BY updated DESC`;
+    const maxResults = Math.min(parseInt(req.query.max) || 500, 1000);
+
+    const fieldsStr = ["assignee", "reporter", "status", "issuetype", "summary",
+      "labels", "components", "comment", "updated", "created", ...EPIC_LINK_FIELDS, "parent"].join(",");
+    const { issues } = await jiraSearchAllFrom(server, jql, fieldsStr, Math.min(maxResults, 100));
+
+    // ── Domain detection: extract domains from labels, components, epic names, keywords
+    function detectDomains(issue) {
+      const domains = new Set();
+      const f = issue.fields;
+      // Labels
+      for (const l of (f.labels || [])) domains.add(l.toLowerCase());
+      // Components
+      for (const c of (f.components || [])) domains.add((c.name || "").toLowerCase());
+      // Epic name
+      const epicKey = getEpicKey(f);
+      if (epicKey) domains.add("epic:" + epicKey);
+      // Keywords from summary
+      const summary = (f.summary || "").toLowerCase();
+      const keywords = ["auth", "api", "frontend", "backend", "database", "ci/cd", "pipeline",
+        "payment", "security", "infra", "deploy", "test", "mobile", "performance", "migration",
+        "monitoring", "logging", "notification", "email", "search", "cache", "config"];
+      for (const kw of keywords) {
+        if (summary.includes(kw)) domains.add(kw);
+      }
+      // Issue type as a weak domain signal
+      const typeName = (f.issuetype?.name || "").toLowerCase();
+      if (typeName === "bug") domains.add("bug-fixing");
+      if (typeName === "epic") domains.add("epic-ownership");
+      return [...domains];
+    }
+
+    // ── Score each person × domain
+    const expertiseMap = {}; // "person:domain" -> { resolved, active, comments, lastActive }
+    const personStats = {};  // person -> { totalResolved, totalActive, domains: Set }
+    const domainStats = {};  // domain -> { people: Set, totalTickets }
+    const now = Date.now();
+
+    function addScore(person, domain, type, date) {
+      if (!person || !domain) return;
+      const key = person + ":" + domain;
+      if (!expertiseMap[key]) expertiseMap[key] = { person, domain, resolved: 0, active: 0, comments: 0, lastActive: null };
+      const entry = expertiseMap[key];
+      if (type === "resolved") entry.resolved++;
+      if (type === "active") entry.active++;
+      if (type === "comment") entry.comments++;
+      if (date && (!entry.lastActive || new Date(date) > new Date(entry.lastActive))) {
+        entry.lastActive = date;
+      }
+
+      if (!personStats[person]) personStats[person] = { totalResolved: 0, totalActive: 0, domains: new Set() };
+      personStats[person].domains.add(domain);
+      if (type === "resolved") personStats[person].totalResolved++;
+      if (type === "active") personStats[person].totalActive++;
+
+      if (!domainStats[domain]) domainStats[domain] = { people: new Set(), totalTickets: 0 };
+      domainStats[domain].people.add(person);
+      domainStats[domain].totalTickets++;
+    }
+
+    for (const issue of issues) {
+      const f = issue.fields;
+      const assignee = f.assignee?.displayName;
+      const reporter = f.reporter?.displayName;
+      const statusCat = f.status?.statusCategory?.key;
+      const domains = detectDomains(issue);
+      const updateDate = f.updated;
+
+      for (const domain of domains) {
+        if (assignee) {
+          if (statusCat === "done") {
+            addScore(assignee, domain, "resolved", updateDate);
+          } else {
+            addScore(assignee, domain, "active", updateDate);
+          }
+        }
+
+        // Comments = knowledge contribution
+        const comments = f.comment?.comments || [];
+        const commenters = new Set();
+        for (const c of comments.slice(-10)) {
+          const name = c.author?.displayName;
+          if (name && name !== assignee && !commenters.has(name)) {
+            commenters.add(name);
+            addScore(name, domain, "comment", c.created);
+          }
+        }
+      }
+    }
+
+    // ── Compute final scores with recency decay
+    const expertiseList = Object.values(expertiseMap).map((e) => {
+      const daysSinceActive = e.lastActive ? Math.floor((now - new Date(e.lastActive).getTime()) / 86400000) : 365;
+      const recencyBonus = Math.max(0, 1 - daysSinceActive / 365); // 0 to 1, decays over a year
+      const rawScore = (e.resolved * 3) + (e.active * 1) + (e.comments * 0.5);
+      const score = Math.round((rawScore * (0.5 + 0.5 * recencyBonus)) * 10) / 10;
+      return { ...e, score, daysSinceActive };
+    }).filter((e) => e.score > 0);
+
+    // ── Build domain → ranked experts
+    const domainExperts = {};
+    for (const e of expertiseList) {
+      if (!domainExperts[e.domain]) domainExperts[e.domain] = [];
+      domainExperts[e.domain].push(e);
+    }
+    for (const domain of Object.keys(domainExperts)) {
+      domainExperts[domain].sort((a, b) => b.score - a.score);
+    }
+
+    // ── Bus factor: domains with only 1 expert
+    const busFactor = Object.entries(domainStats)
+      .filter(([, d]) => d.people.size <= 1 && d.totalTickets >= 3)
+      .map(([domain, d]) => ({
+        domain,
+        expertCount: d.people.size,
+        totalTickets: d.totalTickets,
+        soloExpert: d.people.size === 1 ? [...d.people][0] : null,
+        risk: d.people.size === 0 ? "critical" : "high",
+      }))
+      .sort((a, b) => b.totalTickets - a.totalTickets);
+
+    // ── People summary
+    const people = Object.entries(personStats)
+      .map(([name, stats]) => ({
+        name,
+        totalResolved: stats.totalResolved,
+        totalActive: stats.totalActive,
+        domainCount: stats.domains.size,
+        topDomains: [...stats.domains]
+          .map((d) => ({ domain: d, score: expertiseMap[name + ":" + d]?.score || 0 }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 5),
+      }))
+      .sort((a, b) => b.totalResolved - a.totalResolved);
+
+    // ── Top domains (by ticket count, excluding weak signals)
+    const topDomains = Object.entries(domainStats)
+      .filter(([d]) => !d.startsWith("epic:")) // exclude epic keys as domain names
+      .map(([domain, d]) => ({
+        domain,
+        expertCount: d.people.size,
+        totalTickets: d.totalTickets,
+        topExperts: (domainExperts[domain] || []).slice(0, 3).map((e) => ({
+          name: e.person, score: e.score, resolved: e.resolved, daysSinceActive: e.daysSinceActive,
+        })),
+      }))
+      .sort((a, b) => b.totalTickets - a.totalTickets)
+      .slice(0, 30);
+
+    res.json({
+      totalIssuesAnalyzed: issues.length,
+      people,
+      topDomains,
+      busFactor,
+      domainExperts,
+      stats: {
+        totalPeople: people.length,
+        totalDomains: topDomains.length,
+        busFactorRisks: busFactor.length,
+      },
+    });
+  } catch (err) {
+    console.error("Error analyzing expertise:", err.message);
+    res.status(500).json(errorResponse(req, err));
+  }
+});
+
+// ─── Sprint Prioritization ──────────────────────────────
+
+app.get("/prioritize", async (req, res) => {
+  try {
+    const server = resolveServerFromReq(req);
+    if (!server) return res.status(400).json({ error: "No Jira server configured" });
+
+    const jql = req.query.jql || `project = ${TEAMS[0]?.projectKey || "TEAM"} AND statusCategory != Done ORDER BY priority ASC, updated DESC`;
+    const prioFieldsStr = ["summary", "status", "assignee", "priority", "issuetype",
+      "duedate", "created", "updated", "issuelinks",
+      "labels", "components", ...EPIC_LINK_FIELDS, "parent", "timetracking"].join(",");
+    const { issues } = await jiraSearchAllFrom(server, jql, prioFieldsStr, 100);
+
+    const now = Date.now();
+    const maxSP = STORY_POINT_SETTINGS.maxStoryPoints;
+
+    // Build blocking graph
+    const blockedBy = {};
+    const blocks = {};
+    for (const issue of issues) {
+      for (const link of (issue.fields.issuelinks || [])) {
+        if (link.outwardIssue && (link.type?.outward || "").toLowerCase().includes("block")) {
+          const from = issue.key, to = link.outwardIssue.key;
+          if (!blocks[from]) blocks[from] = new Set();
+          blocks[from].add(to);
+          if (!blockedBy[to]) blockedBy[to] = new Set();
+          blockedBy[to].add(from);
+        }
+        if (link.inwardIssue && (link.type?.inward || "").toLowerCase().includes("block")) {
+          const from = link.inwardIssue.key, to = issue.key;
+          if (!blocks[from]) blocks[from] = new Set();
+          blocks[from].add(to);
+          if (!blockedBy[to]) blockedBy[to] = new Set();
+          blockedBy[to].add(from);
+        }
+      }
+    }
+
+    function countDownstream(key, visited = new Set()) {
+      if (visited.has(key)) return 0;
+      visited.add(key);
+      let count = 0;
+      for (const child of (blocks[key] || [])) {
+        count += 1 + countDownstream(child, visited);
+      }
+      return count;
+    }
+
+    const scored = issues.map((issue) => {
+      const f = issue.fields;
+      const sp = f.customfield_10016 ?? null;
+      const storyPoints = typeof sp === "number" ? sp : null;
+      const statusCat = f.status?.statusCategory?.key;
+      const priority = f.priority?.name || "Medium";
+      const dueDate = f.duedate;
+      const assignee = f.assignee?.displayName;
+      const isBlocked = (blockedBy[issue.key]?.size || 0) > 0;
+      const blocksCount = blocks[issue.key]?.size || 0;
+      const downstreamCount = countDownstream(issue.key);
+      const daysSinceCreated = Math.floor((now - new Date(f.created).getTime()) / 86400000);
+      const isOversized = storyPoints !== null && storyPoints > maxSP;
+      const isNotFibonacci = storyPoints !== null && !FIBONACCI.includes(storyPoints);
+
+      let score = 0;
+      const priorityWeights = { Blocker: 40, Highest: 35, High: 25, Medium: 15, Low: 8, Lowest: 3 };
+      score += priorityWeights[priority] || 15;
+
+      if (dueDate) {
+        const daysUntilDue = Math.floor((new Date(dueDate).getTime() - now) / 86400000);
+        if (daysUntilDue < 0) score += 30;
+        else if (daysUntilDue <= 2) score += 25;
+        else if (daysUntilDue <= 7) score += 15;
+        else if (daysUntilDue <= 14) score += 8;
+      }
+
+      if (downstreamCount > 0) score += Math.min(30, downstreamCount * 10);
+      if (isBlocked) score -= 20;
+      if (daysSinceCreated > 30) score += 5;
+      if (daysSinceCreated > 60) score += 5;
+      if (storyPoints && storyPoints <= 3 && downstreamCount > 0) score += 10;
+      if (statusCat === "indeterminate") score += 5;
+
+      return {
+        key: issue.key, summary: f.summary, status: f.status?.name, statusCategory: statusCat,
+        priority, assignee, storyPoints, dueDate, isBlocked,
+        blockedByKeys: [...(blockedBy[issue.key] || [])],
+        blocksCount, downstreamCount, isOversized, isNotFibonacci, maxStoryPoints: maxSP,
+        score, daysSinceCreated, epicKey: getEpicKey(f), labels: f.labels || [],
+        issueType: f.issuetype?.name,
+      };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+
+    const oversized = scored.filter((t) => t.isOversized);
+    const blocked = scored.filter((t) => t.isBlocked);
+    const unblockers = scored.filter((t) => t.downstreamCount > 0 && !t.isBlocked).sort((a, b) => b.downstreamCount - a.downstreamCount);
+    const overdue = scored.filter((t) => t.dueDate && new Date(t.dueDate).getTime() < now);
+    const quickWins = scored.filter((t) => !t.isBlocked && t.storyPoints && t.storyPoints <= 3 && t.statusCategory === "new").slice(0, 10);
+
+    res.json({
+      tickets: scored, oversized, blocked, unblockers: unblockers.slice(0, 10), overdue, quickWins,
+      storyPointSettings: STORY_POINT_SETTINGS,
+      stats: {
+        total: scored.length, oversizedCount: oversized.length, blockedCount: blocked.length,
+        overdueCount: overdue.length, unblockerCount: unblockers.length,
+        avgStoryPoints: scored.filter((t) => t.storyPoints).length > 0
+          ? Math.round(scored.filter((t) => t.storyPoints).reduce((s, t) => s + t.storyPoints, 0) / scored.filter((t) => t.storyPoints).length * 10) / 10 : 0,
+      },
+    });
+  } catch (err) {
+    console.error("Error prioritizing:", err.message);
+    res.status(500).json(errorResponse(req, err));
+  }
+});
+
 // ─── AI Coach Endpoint ───────────────────────────────────
 
 function buildAiPrompt(context, question, data) {
@@ -3733,11 +4069,20 @@ app.get("/dependencies", async (req, res) => {
     for (const pm of Object.values(projectMatrix)) { delete pm.seenLinks; delete pm.seenBlocking; }
 
     // Critical path: issues that block the most other issues (deduplicated)
-    // Only count unique blocked tickets per blocker (avoid duplicates from bidirectional links)
-    const blockSets = {}; // key -> Set of blocked keys
+    // Edge semantics: from=source issue, to=target issue
+    // For inward links: from=inwardIssue (blocker), to=currentIssue (blocked), direction="is blocked by"
+    // For outward links: from=currentIssue (blocker), to=outwardIssue (blocked), direction="blocks"
+    // In BOTH cases: from is the BLOCKER, to is the BLOCKED
+    const blockSets = {}; // blocker key -> Set of blocked keys
+    const seenBlockPairs = new Set();
     for (const edge of blockingEdges) {
-      if (!blockSets[edge.from]) blockSets[edge.from] = new Set();
-      blockSets[edge.from].add(edge.to);
+      const blocker = edge.from;
+      const blocked = edge.to;
+      const pairKey = blocker + ":" + blocked;
+      if (seenBlockPairs.has(pairKey)) continue;
+      seenBlockPairs.add(pairKey);
+      if (!blockSets[blocker]) blockSets[blocker] = new Set();
+      blockSets[blocker].add(blocked);
     }
     const criticalBlockers = Object.entries(blockSets)
       .map(([key, blockedSet]) => ({
@@ -3749,11 +4094,14 @@ app.get("/dependencies", async (req, res) => {
       .sort((a, b) => b.blocksCount - a.blocksCount)
       .slice(0, 15);
 
-    // Build blocking tree: for each root blocker, walk the chain
+    // Build blocking tree from ALL blockers (not just top 15 criticalBlockers)
     // A "root" is a blocker that is NOT blocked by anyone else
     const blockedBySet = new Set();
-    for (const edge of blockingEdges) blockedBySet.add(edge.to);
-    const rootBlockers = criticalBlockers.filter(b => !blockedBySet.has(b.key));
+    for (const s of Object.values(blockSets)) for (const k of s) blockedBySet.add(k);
+    const allBlockerKeys = Object.keys(blockSets);
+    const rootBlockerKeys = allBlockerKeys.filter(k => !blockedBySet.has(k));
+    // If no pure roots (all in cycles), use all blockers
+    const treeRootKeys = rootBlockerKeys.length > 0 ? rootBlockerKeys : allBlockerKeys;
 
     function buildBlockingTree(key, visited = new Set()) {
       if (visited.has(key)) return null; // cycle protection
@@ -3777,8 +4125,8 @@ app.get("/dependencies", async (req, res) => {
       };
     }
 
-    const blockingTree = rootBlockers
-      .map(b => buildBlockingTree(b.key))
+    const blockingTree = treeRootKeys
+      .map(k => buildBlockingTree(k))
       .filter(Boolean)
       .sort((a, b) => {
         // Sort by total descendants (deep count)
