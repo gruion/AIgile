@@ -3631,27 +3631,183 @@ app.get("/prioritize", async (req, res) => {
       return count;
     }
 
-    const scored = issues.map((issue) => {
+    // Build ticket lookup for cross-referencing
+    const ticketMap = {};
+    for (const issue of issues) {
       const f = issue.fields;
-      const sp = f.customfield_10016 ?? null;
-      const storyPoints = typeof sp === "number" ? sp : null;
-      const statusCat = f.status?.statusCategory?.key;
-      const priority = f.priority?.name || "Medium";
-      const dueDate = f.duedate;
-      const assignee = f.assignee?.displayName;
+      ticketMap[issue.key] = {
+        key: issue.key, summary: f.summary, status: f.status?.name,
+        statusCategory: f.status?.statusCategory?.key,
+        priority: f.priority?.name || "Medium",
+        assignee: f.assignee?.displayName,
+        dueDate: f.duedate,
+        storyPoints: typeof (f.customfield_10016 ?? null) === "number" ? f.customfield_10016 : null,
+        updated: f.updated,
+      };
+    }
+
+    const priorityRank = { Blocker: 0, Highest: 1, High: 2, Medium: 3, Low: 4, Lowest: 5 };
+
+    // ── Incoherence detection ──
+    const incoherences = [];
+
+    for (const [blockerKey, blockedSet] of Object.entries(blocks)) {
+      const blocker = ticketMap[blockerKey];
+      if (!blocker) continue;
+
+      for (const blockedKey of blockedSet) {
+        const blocked = ticketMap[blockedKey];
+        if (!blocked) continue;
+
+        // 1. Due date conflict: blocker due AFTER blocked
+        if (blocker.dueDate && blocked.dueDate && new Date(blocker.dueDate) > new Date(blocked.dueDate)) {
+          incoherences.push({
+            type: "due_date_conflict", severity: "critical",
+            title: "Blocker due after blocked ticket",
+            description: `${blockerKey} (due ${blocker.dueDate}) blocks ${blockedKey} (due ${blocked.dueDate}) — impossible to meet deadline`,
+            blocker: blockerKey, blocked: blockedKey,
+            fix: `Move ${blockerKey} due date before ${blocked.dueDate} or extend ${blockedKey} deadline`,
+          });
+        }
+
+        // 2. Priority conflict: low priority blocks high priority
+        if ((priorityRank[blocker.priority] ?? 3) > (priorityRank[blocked.priority] ?? 3) + 1) {
+          incoherences.push({
+            type: "priority_conflict", severity: "high",
+            title: "Low priority blocks high priority",
+            description: `${blockerKey} (${blocker.priority}) blocks ${blockedKey} (${blocked.priority}) — escalate the blocker`,
+            blocker: blockerKey, blocked: blockedKey,
+            fix: `Raise ${blockerKey} priority to at least ${blocked.priority}`,
+          });
+        }
+
+        // 3. Status conflict: blocked ticket in progress while blocker is To Do
+        if (blocked.statusCategory === "indeterminate" && blocker.statusCategory === "new") {
+          incoherences.push({
+            type: "status_conflict", severity: "high",
+            title: "Working on blocked ticket before blocker starts",
+            description: `${blockedKey} is In Progress but ${blockerKey} is still To Do — work may be wasted`,
+            blocker: blockerKey, blocked: blockedKey,
+            fix: `Start ${blockerKey} first, or verify ${blockedKey} can proceed independently`,
+          });
+        }
+
+        // 4. Same assignee blocking themselves
+        if (blocker.assignee && blocker.assignee === blocked.assignee && blocker.statusCategory !== "done") {
+          incoherences.push({
+            type: "self_blocking", severity: "medium",
+            title: "Same person assigned to blocker and blocked",
+            description: `${blocker.assignee} owns both ${blockerKey} and ${blockedKey} — they're blocking themselves`,
+            blocker: blockerKey, blocked: blockedKey,
+            fix: `${blocker.assignee} should finish ${blockerKey} first, or reassign one ticket`,
+          });
+        }
+      }
+
+      // 5. Stale blocker: blocks others but no update in 7+ days
+      if (blocker.updated && blocker.statusCategory !== "done") {
+        const daysSinceUpdate = Math.floor((now - new Date(blocker.updated).getTime()) / 86400000);
+        if (daysSinceUpdate >= 7 && blockedSet.size > 0) {
+          incoherences.push({
+            type: "stale_blocker", severity: "high",
+            title: "Stale blocker — no update in 7+ days",
+            description: `${blockerKey} blocks ${blockedSet.size} ticket(s) but hasn't been updated in ${daysSinceUpdate} days`,
+            blocker: blockerKey, blocked: [...blockedSet].join(", "),
+            fix: `Check status of ${blockerKey} with ${blocker.assignee || "unassigned owner"} — it's holding up work`,
+          });
+        }
+      }
+
+      // 6. Unassigned blocker blocking assigned work
+      if (!blocker.assignee && blocker.statusCategory !== "done") {
+        const assignedBlocked = [...blockedSet].filter((k) => ticketMap[k]?.assignee);
+        if (assignedBlocked.length > 0) {
+          incoherences.push({
+            type: "unassigned_blocker", severity: "high",
+            title: "Unassigned blocker holding up assigned work",
+            description: `${blockerKey} is unassigned but blocks ${assignedBlocked.join(", ")} (assigned) — nobody's working on the bottleneck`,
+            blocker: blockerKey, blocked: assignedBlocked.join(", "),
+            fix: `Assign ${blockerKey} immediately`,
+          });
+        }
+      }
+    }
+
+    // 7. Orphan high-priority: Highest/Blocker with no assignee and no due date
+    for (const issue of issues) {
+      const f = issue.fields;
+      const p = f.priority?.name;
+      if ((p === "Highest" || p === "Blocker") && !f.assignee && !f.duedate && f.status?.statusCategory?.key !== "done") {
+        incoherences.push({
+          type: "orphan_urgent", severity: "critical",
+          title: "Urgent ticket with no owner or deadline",
+          description: `${issue.key} is ${p} priority but has no assignee and no due date — it will be forgotten`,
+          blocker: issue.key, blocked: null,
+          fix: `Assign and set a due date on ${issue.key}`,
+        });
+      }
+    }
+
+    // 8. Circular dependencies
+    function detectCycle(startKey) {
+      const visited = new Set();
+      const stack = [startKey];
+      while (stack.length > 0) {
+        const key = stack.pop();
+        if (visited.has(key)) {
+          if (key === startKey && visited.size > 1) return true;
+          continue;
+        }
+        visited.add(key);
+        for (const child of (blocks[key] || [])) stack.push(child);
+      }
+      return false;
+    }
+    const cycleChecked = new Set();
+    for (const key of Object.keys(blocks)) {
+      if (!cycleChecked.has(key) && detectCycle(key)) {
+        incoherences.push({
+          type: "circular_dependency", severity: "critical",
+          title: "Circular dependency detected",
+          description: `${key} is part of a circular blocking chain — deadlock`,
+          blocker: key, blocked: [...(blocks[key] || [])].join(", "),
+          fix: `Review and break the dependency cycle involving ${key}`,
+        });
+      }
+      cycleChecked.add(key);
+    }
+
+    // Sort incoherences by severity
+    const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+    incoherences.sort((a, b) => (sevOrder[a.severity] ?? 3) - (sevOrder[b.severity] ?? 3));
+
+    // ── Score each ticket (with incoherence bonuses) ──
+    const incoherencesByTicket = {};
+    for (const inc of incoherences) {
+      if (inc.blocker) {
+        if (!incoherencesByTicket[inc.blocker]) incoherencesByTicket[inc.blocker] = [];
+        incoherencesByTicket[inc.blocker].push(inc);
+      }
+    }
+
+    const scored = issues.map((issue) => {
+      const t = ticketMap[issue.key];
+      const statusCat = t.statusCategory;
       const isBlocked = (blockedBy[issue.key]?.size || 0) > 0;
       const blocksCount = blocks[issue.key]?.size || 0;
       const downstreamCount = countDownstream(issue.key);
-      const daysSinceCreated = Math.floor((now - new Date(f.created).getTime()) / 86400000);
-      const isOversized = storyPoints !== null && storyPoints > maxSP;
-      const isNotFibonacci = storyPoints !== null && !FIBONACCI.includes(storyPoints);
+      const daysSinceCreated = Math.floor((now - new Date(issue.fields.created).getTime()) / 86400000);
+      const isOversized = t.storyPoints !== null && t.storyPoints > maxSP;
+      const isNotFibonacci = t.storyPoints !== null && !FIBONACCI.includes(t.storyPoints);
+      const ticketIncoherences = incoherencesByTicket[issue.key] || [];
+      const daysSinceUpdate = t.updated ? Math.floor((now - new Date(t.updated).getTime()) / 86400000) : 0;
 
       let score = 0;
       const priorityWeights = { Blocker: 40, Highest: 35, High: 25, Medium: 15, Low: 8, Lowest: 3 };
-      score += priorityWeights[priority] || 15;
+      score += priorityWeights[t.priority] || 15;
 
-      if (dueDate) {
-        const daysUntilDue = Math.floor((new Date(dueDate).getTime() - now) / 86400000);
+      if (t.dueDate) {
+        const daysUntilDue = Math.floor((new Date(t.dueDate).getTime() - now) / 86400000);
         if (daysUntilDue < 0) score += 30;
         else if (daysUntilDue <= 2) score += 25;
         else if (daysUntilDue <= 7) score += 15;
@@ -3662,16 +3818,24 @@ app.get("/prioritize", async (req, res) => {
       if (isBlocked) score -= 20;
       if (daysSinceCreated > 30) score += 5;
       if (daysSinceCreated > 60) score += 5;
-      if (storyPoints && storyPoints <= 3 && downstreamCount > 0) score += 10;
+      if (t.storyPoints && t.storyPoints <= 3 && downstreamCount > 0) score += 10;
       if (statusCat === "indeterminate") score += 5;
 
+      // Incoherence bonuses
+      if (ticketIncoherences.some((i) => i.severity === "critical")) score += 15;
+      else if (ticketIncoherences.some((i) => i.severity === "high")) score += 10;
+      if (blocksCount > 0 && daysSinceUpdate >= 7) score += 10; // stale blocker
+      if (!t.assignee && (t.priority === "Highest" || t.priority === "Blocker")) score += 10; // orphan urgent
+      if (blocksCount > 0 && !t.assignee) score += 5; // unassigned blocker
+
       return {
-        key: issue.key, summary: f.summary, status: f.status?.name, statusCategory: statusCat,
-        priority, assignee, storyPoints, dueDate, isBlocked,
-        blockedByKeys: [...(blockedBy[issue.key] || [])],
+        key: issue.key, summary: t.summary, status: t.status, statusCategory: statusCat,
+        priority: t.priority, assignee: t.assignee, storyPoints: t.storyPoints, dueDate: t.dueDate,
+        isBlocked, blockedByKeys: [...(blockedBy[issue.key] || [])],
         blocksCount, downstreamCount, isOversized, isNotFibonacci, maxStoryPoints: maxSP,
-        score, daysSinceCreated, epicKey: getEpicKey(f), labels: f.labels || [],
-        issueType: f.issuetype?.name,
+        score, daysSinceCreated, epicKey: getEpicKey(issue.fields), labels: issue.fields.labels || [],
+        issueType: issue.fields.issuetype?.name,
+        incoherenceCount: ticketIncoherences.length,
       };
     });
 
@@ -3685,10 +3849,12 @@ app.get("/prioritize", async (req, res) => {
 
     res.json({
       tickets: scored, oversized, blocked, unblockers: unblockers.slice(0, 10), overdue, quickWins,
+      incoherences,
       storyPointSettings: STORY_POINT_SETTINGS,
       stats: {
         total: scored.length, oversizedCount: oversized.length, blockedCount: blocked.length,
         overdueCount: overdue.length, unblockerCount: unblockers.length,
+        incoherenceCount: incoherences.length,
         avgStoryPoints: scored.filter((t) => t.storyPoints).length > 0
           ? Math.round(scored.filter((t) => t.storyPoints).reduce((s, t) => s + t.storyPoints, 0) / scored.filter((t) => t.storyPoints).length * 10) / 10 : 0,
       },

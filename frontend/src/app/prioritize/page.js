@@ -70,6 +70,7 @@ function TicketRow({ ticket, rank, jiraBaseUrl }) {
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{ticket.status}</span>
 
         {/* Flags */}
+        {ticket.incoherenceCount > 0 && <span className="text-[9px] bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded-full">{ticket.incoherenceCount} issue{ticket.incoherenceCount > 1 ? "s" : ""}</span>}
         {ticket.isBlocked && <span className="text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">blocked</span>}
         {ticket.isOversized && <span className="text-[9px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full">split needed</span>}
         {ticket.downstreamCount > 0 && <span className="text-[9px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full">unblocks {ticket.downstreamCount}</span>}
@@ -123,7 +124,7 @@ export default function PrioritizePage() {
   const [error, setError] = useState(null);
   const [jql, setJql] = useState("");
   const [inputJql, setInputJql] = useState("");
-  const [tab, setTab] = useState("all"); // all | oversized | unblockers | overdue | quickWins
+  const [tab, setTab] = useState("all"); // all | oversized | unblockers | overdue | quickWins | incoherences
 
   const load = useCallback(async (query) => {
     setLoading(true);
@@ -149,6 +150,7 @@ export default function PrioritizePage() {
   useEffect(() => { if (jql) load(jql); }, [jql, load]);
 
   const displayedTickets = data ? (
+    tab === "incoherences" ? [] : // handled separately
     tab === "oversized" ? data.oversized :
     tab === "unblockers" ? data.unblockers :
     tab === "overdue" ? data.overdue :
@@ -216,6 +218,10 @@ export default function PrioritizePage() {
                 <p className="text-[9px] text-gray-500 mt-0.5">Unblockers</p>
               </div>
               <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
+                <span className={`text-xl font-bold ${(data.stats.incoherenceCount || 0) > 0 ? "text-orange-700" : "text-green-700"}`}>{data.stats.incoherenceCount || 0}</span>
+                <p className="text-[9px] text-gray-500 mt-0.5">Incoherences</p>
+              </div>
+              <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
                 <span className="text-xl font-bold text-blue-700">{data.stats.avgStoryPoints}</span>
                 <p className="text-[9px] text-gray-500 mt-0.5">Avg SP</p>
               </div>
@@ -225,6 +231,7 @@ export default function PrioritizePage() {
             <div className="flex items-center gap-2 flex-wrap">
               {[
                 { key: "all", label: "All (ranked)", count: data.stats.total },
+                { key: "incoherences", label: "Incoherences", count: data.stats.incoherenceCount || 0, color: "text-orange-700" },
                 { key: "unblockers", label: "Unblockers first", count: data.stats.unblockerCount, color: "text-green-700" },
                 { key: "oversized", label: "Need splitting", count: data.stats.oversizedCount, color: "text-red-700" },
                 { key: "overdue", label: "Overdue", count: data.stats.overdueCount, color: "text-red-700" },
@@ -244,18 +251,98 @@ export default function PrioritizePage() {
             </div>
 
             {/* Score legend */}
-            <div className="bg-gray-50 rounded-lg border border-gray-200 px-4 py-2 flex items-center gap-4 text-[10px] text-gray-500 flex-wrap">
-              <span className="font-semibold text-gray-700">Score formula:</span>
-              <span>Priority (0-40)</span>
-              <span>+ Due date urgency (0-30)</span>
-              <span>+ Dependency impact (0-30)</span>
-              <span>+ Age bonus (0-10)</span>
-              <span>+ Efficiency bonus (0-10)</span>
-              <span className="text-amber-600">- Blocked penalty (-20)</span>
-            </div>
+            {tab !== "incoherences" && (
+              <div className="bg-gray-50 rounded-lg border border-gray-200 px-4 py-2 flex items-center gap-4 text-[10px] text-gray-500 flex-wrap">
+                <span className="font-semibold text-gray-700">Score:</span>
+                <span>Priority (0-40)</span>
+                <span>+ Due date (0-30)</span>
+                <span>+ Deps impact (0-30)</span>
+                <span className="text-orange-600">+ Incoherence (0-15)</span>
+                <span>+ Stale blocker (0-10)</span>
+                <span>+ Orphan urgent (0-10)</span>
+                <span>+ Age (0-10)</span>
+                <span>+ Efficiency (0-10)</span>
+                <span className="text-amber-600">- Blocked (-20)</span>
+              </div>
+            )}
 
-            {/* Ticket list */}
-            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            {/* Incoherences view */}
+            {tab === "incoherences" && (
+              <div className="space-y-2">
+                {(data.incoherences || []).length === 0 ? (
+                  <div className="bg-green-50 border border-green-200 rounded-xl p-8 text-center">
+                    <svg className="w-10 h-10 mx-auto text-green-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <p className="text-green-700 font-medium">No incoherences detected!</p>
+                    <p className="text-green-600 text-sm mt-1">All dependencies, priorities, and due dates are consistent.</p>
+                  </div>
+                ) : (
+                  (data.incoherences || []).map((inc, i) => {
+                    const sevStyles = {
+                      critical: "border-red-300 bg-red-50",
+                      high: "border-orange-300 bg-orange-50",
+                      medium: "border-amber-200 bg-amber-50",
+                      low: "border-gray-200 bg-gray-50",
+                    };
+                    const sevBadge = {
+                      critical: "bg-red-200 text-red-800",
+                      high: "bg-orange-200 text-orange-800",
+                      medium: "bg-amber-200 text-amber-800",
+                      low: "bg-gray-200 text-gray-600",
+                    };
+                    const typeLabels = {
+                      due_date_conflict: "Due Date Conflict",
+                      priority_conflict: "Priority Mismatch",
+                      status_conflict: "Status Conflict",
+                      self_blocking: "Self-Blocking",
+                      stale_blocker: "Stale Blocker",
+                      unassigned_blocker: "Unassigned Blocker",
+                      orphan_urgent: "Orphan Urgent",
+                      circular_dependency: "Circular Dependency",
+                    };
+                    return (
+                      <div key={i} className={`rounded-xl border-2 p-4 ${sevStyles[inc.severity] || sevStyles.low}`}>
+                        <div className="flex items-start gap-3">
+                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded shrink-0 ${sevBadge[inc.severity] || sevBadge.low}`}>
+                            {inc.severity}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{typeLabels[inc.type] || inc.type}</span>
+                              <span className="text-sm font-semibold text-gray-900">{inc.title}</span>
+                            </div>
+                            <p className="text-xs text-gray-700">{inc.description}</p>
+                            <div className="flex items-center gap-3 mt-2">
+                              {inc.blocker && (
+                                <a href={`${jiraBaseUrl}/browse/${inc.blocker}`} target="_blank" rel="noopener noreferrer"
+                                  className="text-[10px] font-mono text-blue-600 hover:underline bg-blue-50 px-1.5 py-0.5 rounded">
+                                  {inc.blocker}
+                                </a>
+                              )}
+                              {inc.blocked && (
+                                <>
+                                  <span className="text-[10px] text-gray-400">→</span>
+                                  <span className="text-[10px] font-mono text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded">
+                                    {inc.blocked}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                            <div className="mt-2 text-xs text-green-700 bg-green-50 border border-green-200 rounded px-2 py-1">
+                              Fix: {inc.fix}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {/* Ticket list (hidden when incoherences tab is active) */}
+            {tab !== "incoherences" && <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
               <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
                 <span className="text-xs font-semibold text-gray-700">{displayedTickets.length} tickets</span>
                 <span className="text-[10px] text-gray-400">Higher score = do first</span>
@@ -267,7 +354,7 @@ export default function PrioritizePage() {
                   <TicketRow key={ticket.key} ticket={ticket} rank={i + 1} jiraBaseUrl={jiraBaseUrl} />
                 ))
               )}
-            </div>
+            </div>}
           </>
         )}
 
