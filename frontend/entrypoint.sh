@@ -7,4 +7,4 @@ if [ -n "$NEXT_PUBLIC_API_URL" ] && [ "$NEXT_PUBLIC_API_URL" != "__API_URL_PLACE
   find /tmp/app -name '*.js' -exec sed -i "s|__API_URL_PLACEHOLDER__|$NEXT_PUBLIC_API_URL|g" {} +
   cd /tmp/app
 fi
-exec node server.js
+HOSTNAME=0.0.0.0 exec node server.js
