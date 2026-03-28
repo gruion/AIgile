@@ -472,8 +472,94 @@ function buildEpicChildrenJql(epicKey) {
 
 // ─── Routes ──────────────────────────────────────────────
 
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", jira: JIRA_BASE_URL, epicLinkJql: HAS_EPIC_LINK_JQL });
+app.get("/health", async (req, res) => {
+  const startTime = Date.now();
+  const checks = [];
+  let overallStatus = "healthy";
+
+  // 1. API itself
+  checks.push({ name: "API Server", status: "healthy", message: "Express running on port " + PORT, latencyMs: 0 });
+
+  // 2. Configuration
+  const hasServers = JIRA_SERVERS.length > 0;
+  checks.push({
+    name: "Configuration",
+    status: hasServers ? "healthy" : "degraded",
+    message: hasServers
+      ? `${JIRA_SERVERS.length} server(s), ${TEAMS.length} team(s), source: ${configSource}`
+      : "No Jira servers configured — run setup wizard",
+    details: { configSource, serverCount: JIRA_SERVERS.length, teamCount: TEAMS.length, needsSetup: needsSetup() },
+  });
+  if (!hasServers) overallStatus = "degraded";
+
+  // 3. Jira connectivity (test each server)
+  for (const server of JIRA_SERVERS) {
+    try {
+      const jiraStart = Date.now();
+      const data = await jiraFetchFrom(server, "/rest/api/2/serverInfo");
+      checks.push({
+        name: `Jira: ${server.name}`,
+        status: "healthy",
+        message: `${data.serverTitle || "Jira"} v${data.version || "?"}`,
+        latencyMs: Date.now() - jiraStart,
+        details: { url: server.url, version: data.version, baseUrl: data.baseUrl },
+      });
+    } catch (err) {
+      checks.push({
+        name: `Jira: ${server.name}`,
+        status: "unhealthy",
+        message: err.message?.slice(0, 100),
+        latencyMs: 0,
+        details: { url: server.url },
+      });
+      overallStatus = "unhealthy";
+    }
+  }
+
+  // 4. AI Provider
+  const aiEnabled = AI_CONFIG?.enabled && AI_CONFIG?.apiKey;
+  checks.push({
+    name: "AI Provider",
+    status: aiEnabled ? "healthy" : "not_configured",
+    message: aiEnabled
+      ? `${AI_CONFIG.provider} (${AI_CONFIG.model || "default"}) enabled`
+      : "No AI provider configured — copy/paste mode active",
+    details: { provider: AI_CONFIG?.provider || "", model: AI_CONFIG?.model || "", enabled: !!aiEnabled },
+  });
+
+  // 5. RACI data
+  const raciCount = Object.keys(raciMatrices).length;
+  checks.push({
+    name: "RACI Matrices",
+    status: raciCount > 0 ? "healthy" : "not_configured",
+    message: raciCount > 0 ? `${raciCount} matrix(es) documented` : "No RACI matrices created",
+  });
+
+  // 6. Config persistence
+  checks.push({
+    name: "Config Persistence",
+    status: configSource === "file" ? "healthy" : configSource === "defaults" ? "degraded" : "healthy",
+    message: configSource === "file" ? "config.json loaded" : configSource === "defaults" ? "Using defaults — no config saved yet" : `Source: ${configSource}`,
+  });
+
+  const totalLatency = Date.now() - startTime;
+
+  res.json({
+    status: overallStatus,
+    edition: "Open Source",
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    version: "1.0.0",
+    totalLatencyMs: totalLatency,
+    checks,
+    summary: {
+      total: checks.length,
+      healthy: checks.filter((c) => c.status === "healthy").length,
+      degraded: checks.filter((c) => c.status === "degraded").length,
+      unhealthy: checks.filter((c) => c.status === "unhealthy").length,
+      notConfigured: checks.filter((c) => c.status === "not_configured").length,
+    },
+  });
 });
 
 // ─── AI Provider Config (stored per tenant or in file) ───
