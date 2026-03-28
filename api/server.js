@@ -417,23 +417,8 @@ async function jiraFetchAgile(path, serverId) {
 
 // Paginated search — fetches ALL matching issues, not just one page
 async function jiraSearchAll(jql, fieldsStr, pageSize = 100, expand = "", serverId = null) {
-  let startAt = 0;
-  let allIssues = [];
-  let total = 0;
-
-  do {
-    const expandParam = expand ? `&expand=${expand}` : "";
-    const data = await jiraFetch(
-      `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}${expandParam}`,
-      serverId
-    );
-    total = data.total;
-    allIssues = allIssues.concat(data.issues);
-    startAt += data.issues.length;
-    if (data.issues.length === 0) break; // safety
-  } while (startAt < total);
-
-  return { issues: allIssues, total };
+  const server = resolveServer(serverId);
+  return jiraSearchAllFrom(server, jql, fieldsStr, pageSize, expand);
 }
 
 function daysSince(dateStr) {
