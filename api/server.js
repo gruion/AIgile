@@ -182,15 +182,47 @@ async function jiraFetchAgileFrom(server, path) {
   return res.json();
 }
 
+// Search using POST /rest/api/3/search/jql (Jira Cloud 2025+), falls back to GET /rest/api/2/search
 async function jiraSearchAllFrom(server, jql, fieldsStr, pageSize = 100, expand = "") {
   let startAt = 0;
   let allIssues = [];
   let total = 0;
   do {
-    const expandParam = expand ? `&expand=${expand}` : "";
-    const data = await jiraFetchFrom(server,
-      `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}${expandParam}`
-    );
+    let data;
+    try {
+      // Try v3 POST endpoint first (required for Jira Cloud since 2025)
+      const body = {
+        jql,
+        fields: fieldsStr.split(",").map((f) => f.trim()),
+        startAt,
+        maxResults: pageSize,
+      };
+      if (expand) body.expand = expand.split(",").map((e) => e.trim());
+      const url = `${server.url}/rest/api/3/search/jql`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: jiraHeadersFor(server),
+        body: JSON.stringify(body),
+      });
+      if (res.status === 404 || res.status === 405 || res.status === 410) {
+        throw new Error("v3 not available");
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Jira API ${res.status} (${server.name}): ${text}`);
+      }
+      data = await res.json();
+    } catch (err) {
+      if (err.message === "v3 not available") {
+        // Fallback: GET /rest/api/2/search (self-hosted Jira)
+        const expandParam = expand ? `&expand=${expand}` : "";
+        data = await jiraFetchFrom(server,
+          `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}${expandParam}`
+        );
+      } else {
+        throw err;
+      }
+    }
     total = data.total;
     allIssues = allIssues.concat(data.issues);
     startAt += data.issues.length;
