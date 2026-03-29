@@ -27,7 +27,11 @@ export default function Home() {
     try {
       const result = await fetchIssues(query);
       setData(result);
-      toast.success(`Loaded ${result.total} issues`);
+      if (result.truncated) {
+        toast.warn(`Showing ${result.total} of ${result.totalAvailable} issues. Narrow your query for better results.`);
+      } else {
+        toast.success(`Loaded ${result.total} issues`);
+      }
     } catch (err) {
       setError(err.message);
       toast.error("Failed to load issues: " + err.message);
@@ -162,6 +166,16 @@ export default function Home() {
       <main className="max-w-[1400px] mx-auto px-4 py-6 space-y-6">
         {/* Stats bar */}
         {data?.stats && <StatsBar stats={data.stats} />}
+
+        {/* Truncation warning */}
+        {data?.truncated && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+            <strong>Results truncated:</strong> Showing {data.total} of {data.totalAvailable} matching issues.
+            <span className="text-xs text-amber-600 ml-1">
+              Add filters to your JQL query or set <code className="bg-amber-100 px-1 rounded">MAX_ISSUES_PER_QUERY</code> env var to increase the limit.
+            </span>
+          </div>
+        )}
 
         {/* Error */}
         {error && (

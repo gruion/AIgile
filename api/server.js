@@ -182,20 +182,50 @@ async function jiraFetchAgileFrom(server, path) {
   return res.json();
 }
 
+// ─── In-memory Jira search cache ─────────────────────────
+const _jiraCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function jiraCacheGet(jql, fieldsStr, maxTotal) {
+  const key = `${jql}:${fieldsStr}:${maxTotal}`;
+  const entry = _jiraCache.get(key);
+  if (entry && Date.now() - entry.ts < CACHE_TTL) return entry.data;
+  if (entry) _jiraCache.delete(key);
+  return null;
+}
+
+function jiraCacheSet(jql, fieldsStr, maxTotal, data) {
+  const key = `${jql}:${fieldsStr}:${maxTotal}`;
+  _jiraCache.set(key, { data, ts: Date.now() });
+  if (_jiraCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of _jiraCache) { if (now - v.ts > CACHE_TTL) _jiraCache.delete(k); }
+  }
+}
+
+// Max issues per query (configurable via env, default 500)
+const MAX_ISSUES_PER_QUERY = parseInt(process.env.MAX_ISSUES_PER_QUERY) || 500;
+
 // Search using POST /rest/api/3/search/jql (Jira Cloud 2025+), falls back to GET /rest/api/2/search
-async function jiraSearchAllFrom(server, jql, fieldsStr, pageSize = 100, expand = "") {
+// maxTotal caps the total issues fetched (0 = use default cap)
+async function jiraSearchAllFrom(server, jql, fieldsStr, pageSize = 100, expand = "", maxTotal = 0) {
   let startAt = 0;
   let allIssues = [];
   let total = 0;
+  const cap = maxTotal > 0 ? maxTotal : MAX_ISSUES_PER_QUERY;
+
+  // Check cache
+  const cached = jiraCacheGet(jql, fieldsStr, cap);
+  if (cached) return cached;
+
   do {
     let data;
     try {
-      // Try v3 POST endpoint first (required for Jira Cloud since 2025)
       const body = {
         jql,
         fields: fieldsStr.split(",").map((f) => f.trim()),
         startAt,
-        maxResults: pageSize,
+        maxResults: Math.min(pageSize, cap - allIssues.length),
       };
       if (expand) body.expand = expand.split(",").map((e) => e.trim());
       const url = `${server.url}/rest/api/3/search/jql`;
@@ -214,10 +244,9 @@ async function jiraSearchAllFrom(server, jql, fieldsStr, pageSize = 100, expand 
       data = await res.json();
     } catch (err) {
       if (err.message === "v3 not available") {
-        // Fallback: GET /rest/api/2/search (self-hosted Jira)
         const expandParam = expand ? `&expand=${expand}` : "";
         data = await jiraFetchFrom(server,
-          `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${pageSize}&fields=${fieldsStr}${expandParam}`
+          `/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${Math.min(pageSize, cap - allIssues.length)}&fields=${fieldsStr}${expandParam}`
         );
       } else {
         throw err;
@@ -227,8 +256,17 @@ async function jiraSearchAllFrom(server, jql, fieldsStr, pageSize = 100, expand 
     allIssues = allIssues.concat(data.issues);
     startAt += data.issues.length;
     if (data.issues.length === 0) break;
+    if (allIssues.length >= cap) break;
   } while (startAt < total);
-  return { issues: allIssues, total };
+
+  const result = {
+    issues: allIssues,
+    total: allIssues.length,
+    totalAvailable: total,
+    truncated: allIssues.length < total,
+  };
+  jiraCacheSet(jql, fieldsStr, cap, result);
+  return result;
 }
 
 // Custom JQL template for finding epic children — use {EPIC_KEY} as placeholder
@@ -867,7 +905,7 @@ app.get("/issues", async (req, res) => {
 
     epicList.sort((a, b) => b.stats.criticalCount - a.stats.criticalCount || a.progress - b.progress);
 
-    res.json({
+    const response = {
       total: data.total,
       epics: epicList,
       noEpic,
@@ -880,7 +918,13 @@ app.get("/issues", async (req, res) => {
         stale: issues.filter((i) => i.urgencyFlags.some((f) => f.type === "stale")).length,
         unassigned: issues.filter((i) => i.urgencyFlags.some((f) => f.type === "unassigned")).length,
       },
-    });
+    };
+    if (data.truncated) {
+      response.truncated = true;
+      response.totalAvailable = data.totalAvailable;
+      response.warning = `Showing ${data.total} of ${data.totalAvailable} issues. Narrow your JQL query or set MAX_ISSUES_PER_QUERY env var.`;
+    }
+    res.json(response);
   } catch (err) {
     console.error("Error fetching issues:", err.message);
     res.status(500).json(errorResponse(req, err));
